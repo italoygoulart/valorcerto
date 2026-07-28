@@ -124,6 +124,22 @@ export function initDb() {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_indice_unico
       ON indices_fipezap(data_referencia, regiao, tipo_imovel);
+
+    -- Fotos do imóvel e documentos (matrícula, IPTU etc.) anexados a uma
+    -- avaliação. O arquivo em si fica no R2 (bucket privado); aqui só a
+    -- referência (chave do objeto), nunca o conteúdo.
+    CREATE TABLE IF NOT EXISTS anexos (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      avaliacao_id  INTEGER NOT NULL REFERENCES avaliacoes(id) ON DELETE CASCADE,
+      tipo          TEXT NOT NULL CHECK (tipo IN ('foto','documento')),
+      chave         TEXT NOT NULL,
+      nome_original TEXT,
+      mime_type     TEXT NOT NULL,
+      tamanho_bytes INTEGER NOT NULL,
+      criado_em     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_anexos_avaliacao ON anexos(avaliacao_id);
   `);
 
   migrarColunasPtam();

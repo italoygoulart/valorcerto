@@ -5,13 +5,20 @@
  * (área do corretor e admin).
  */
 
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
+import multer from 'multer';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync } from 'fs';
 
 import db, { initDb } from './db.js';
+import {
+  uploadAnexo, urlAssinada, baixarAnexo,
+  ANEXO_MIME_PERMITIDOS, ANEXO_TAMANHO_MAXIMO, ANEXO_QTD_MAXIMA_POR_AVALIACAO,
+} from './storage.js';
 import {
   hashSenha, verificarSenha, gerarToken,
   exigirLogin, exigirAssinaturaAtiva, exigirAdmin, validarFormatoCreci,
@@ -19,10 +26,24 @@ import {
 import { calcularEstimativa } from '../src/lib/motorFipeZap.js';
 import { avaliarPorComparaveis } from '../src/lib/motorComparaveis.js';
 import { TEXTO_LGPD, VERSAO_LGPD } from '../src/lib/disclaimers.js';
-import { VALOR_M2 } from '../src/data/indiceFipeZap.js';
+import { VALOR_M2, REGIOES, TIPOS_IMOVEL } from '../src/data/indiceFipeZap.js';
+
+const REGIOES_VALIDAS = new Set(Object.values(REGIOES));
+const TIPOS_VALIDOS = new Set(TIPOS_IMOVEL.map((t) => t.id));
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// Render/Railway/Fly (destinos de deploy indicados no README) colocam a API
+// atrás de um único proxy reverso. Sem isso, req.ip sempre retorna o IP do
+// proxy — o que quebra o rate limiting (todo mundo cairia no mesmo balde de
+// contagem, um único IP abusivo derrubaria o limite pra todos os usuários)
+// e também o IP gravado em consentimentos_lgpd (auditoria LGPD registraria
+// o IP do proxy, não o do titular).
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
 // Em produção (Render etc.) o host injeta PORT e a API precisa escutar
 // nela. Em desenvolvimento, o Vite roda em paralelo e algumas ferramentas
 // também injetam PORT (para o Vite) — por isso, fora de produção, usamos
@@ -34,6 +55,80 @@ const PORT =
 
 app.use(cors());
 app.use(express.json());
+
+// Rate limiting das rotas públicas sensíveis: login (brute-force de senha),
+// cadastro e estimativa (spam de leads / esgotamento da base). As rotas
+// autenticadas já exigem token válido, então ficam de fora por ora.
+const limitadorLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' },
+});
+const limitadorEstimativa = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Limite de solicitações atingido. Tente novamente mais tarde.' },
+});
+const limitadorAnexos = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Limite de envio de arquivos atingido. Tente novamente mais tarde.' },
+});
+
+// Upload em memória (não grava em disco local) — o buffer vai direto pro R2.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: ANEXO_TAMANHO_MAXIMO, files: ANEXO_QTD_MAXIMA_POR_AVALIACAO },
+});
+
+/**
+ * Valida e envia os arquivos recebidos para o R2, gravando a referência
+ * na tabela anexos. Compartilhado entre a rota pública (proprietário) e a
+ * autenticada (corretor).
+ */
+async function salvarAnexos(avaliacaoId, arquivos) {
+  const criados = [];
+  for (const arquivo of arquivos) {
+    const tipo = ANEXO_MIME_PERMITIDOS[arquivo.mimetype];
+    if (!tipo) {
+      throw new Error(
+        `Arquivo "${arquivo.originalname}" tem um formato não permitido. Envie apenas JPG, PNG, WEBP ou PDF.`
+      );
+    }
+
+    const chave = await uploadAnexo({
+      avaliacaoId,
+      buffer: arquivo.buffer,
+      mimeType: arquivo.mimetype,
+      nomeOriginal: arquivo.originalname,
+    });
+
+    const r = db
+      .prepare(
+        `INSERT INTO anexos (avaliacao_id, tipo, chave, nome_original, mime_type, tamanho_bytes)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(avaliacaoId, tipo, chave, arquivo.originalname, arquivo.mimetype, arquivo.size);
+
+    criados.push({
+      id: r.lastInsertRowid,
+      tipo,
+      nomeOriginal: arquivo.originalname,
+      mimeType: arquivo.mimetype,
+      url: await urlAssinada(chave, 3600),
+      // Rota própria (mesma origem do app) para reler o conteúdo sem
+      // depender de CORS no bucket — usada ao montar o PDF do laudo.
+      urlConteudo: `/api/corretor/anexo/${r.lastInsertRowid}/conteudo`,
+    });
+  }
+  return criados;
+}
 
 initDb();
 seedDemoSeNecessario();
@@ -47,7 +142,7 @@ seedDemoSeNecessario();
  * Calcula a estimativa gratuita E registra o lead com consentimento LGPD.
  * As duas coisas na mesma transação: sem consentimento, não há estimativa.
  */
-app.post('/api/estimativa', (req, res) => {
+app.post('/api/estimativa', limitadorEstimativa, (req, res) => {
   const { imovel, contato, aceiteLgpd } = req.body;
 
   if (!aceiteLgpd) {
@@ -117,11 +212,47 @@ app.post('/api/estimativa', (req, res) => {
   res.json({ ...estimativa, avaliacaoId });
 });
 
+/**
+ * POST /api/estimativa/:id/anexos
+ * Upload de fotos do imóvel pelo proprietário, logo após ver a estimativa.
+ * Restrito a avaliações do tipo 'gratuita' — não permite anexar em
+ * avaliações de corretor por essa rota pública.
+ */
+app.post(
+  '/api/estimativa/:id/anexos',
+  limitadorAnexos,
+  upload.array('arquivos', ANEXO_QTD_MAXIMA_POR_AVALIACAO),
+  async (req, res) => {
+    const avaliacao = db
+      .prepare(`SELECT id FROM avaliacoes WHERE id = ? AND tipo = 'gratuita'`)
+      .get(req.params.id);
+    if (!avaliacao) return res.status(404).json({ erro: 'Avaliação não encontrada.' });
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
+    }
+
+    const jaTem = db.prepare('SELECT COUNT(*) n FROM anexos WHERE avaliacao_id = ?').get(avaliacao.id).n;
+    if (jaTem + req.files.length > ANEXO_QTD_MAXIMA_POR_AVALIACAO) {
+      return res
+        .status(400)
+        .json({ erro: `Máximo de ${ANEXO_QTD_MAXIMA_POR_AVALIACAO} arquivos por avaliação.` });
+    }
+
+    try {
+      const anexos = await salvarAnexos(avaliacao.id, req.files);
+      res.json({ anexos });
+    } catch (e) {
+      res.status(400).json({ erro: e.message });
+    }
+  }
+);
+
 /* ══════════════════════════════════════════════════════════════════
    AUTENTICAÇÃO
    ══════════════════════════════════════════════════════════════════ */
 
-app.post('/api/auth/cadastro', (req, res) => {
+app.post('/api/auth/cadastro', limitadorLogin, (req, res) => {
   const { nome, email, senha, creci, telefone, cnai } = req.body;
 
   if (!nome || !email || !senha) {
@@ -130,7 +261,12 @@ app.post('/api/auth/cadastro', (req, res) => {
   if (!validarFormatoCreci(creci)) {
     return res.status(400).json({ erro: 'Informe um número de CRECI válido.' });
   }
-  const existe = db.prepare('SELECT id FROM usuarios WHERE email = ?').get(email);
+  // Filtra por tipo: um proprietário que já pediu estimativa gratuita com
+  // esse e-mail (linha sem senha_hash) não pode bloquear o cadastro de
+  // corretor — são contas de naturezas diferentes.
+  const existe = db
+    .prepare(`SELECT id FROM usuarios WHERE email = ? AND tipo IN ('corretor','admin')`)
+    .get(email);
   if (existe) {
     return res.status(400).json({ erro: 'Este e-mail já está cadastrado.' });
   }
@@ -146,9 +282,14 @@ app.post('/api/auth/cadastro', (req, res) => {
   res.json({ token: gerarToken(usuario), usuario: publicoUsuario(usuario) });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', limitadorLogin, (req, res) => {
   const { email, senha } = req.body;
-  const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+  // Restrito a corretor/admin: só esses tipos têm senha_hash e podem logar
+  // aqui. Sem esse filtro, um proprietário com o mesmo e-mail (sem senha)
+  // poderia ser a linha retornada e derrubar o login do corretor de verdade.
+  const usuario = db
+    .prepare(`SELECT * FROM usuarios WHERE email = ? AND tipo IN ('corretor','admin')`)
+    .get(email);
 
   if (!usuario || !usuario.senha_hash || !verificarSenha(senha, usuario.senha_hash)) {
     return res.status(401).json({ erro: 'E-mail ou senha incorretos.' });
@@ -337,6 +478,67 @@ app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAssinaturaAtiva,
   res.json({ ok: true });
 });
 
+/**
+ * POST /api/corretor/avaliacao/:id/anexos
+ * Upload de fotos e documentos (matrícula, IPTU etc.) pelo corretor, para
+ * usar no laudo PTAM. Só o dono da avaliação pode anexar.
+ */
+app.post(
+  '/api/corretor/avaliacao/:id/anexos',
+  exigirLogin,
+  exigirAssinaturaAtiva,
+  upload.array('arquivos', ANEXO_QTD_MAXIMA_POR_AVALIACAO),
+  async (req, res) => {
+    const avaliacao = db
+      .prepare('SELECT id FROM avaliacoes WHERE id = ? AND usuario_id = ?')
+      .get(req.params.id, req.usuario.id);
+    if (!avaliacao) return res.status(404).json({ erro: 'Avaliação não encontrada.' });
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
+    }
+
+    const jaTem = db.prepare('SELECT COUNT(*) n FROM anexos WHERE avaliacao_id = ?').get(avaliacao.id).n;
+    if (jaTem + req.files.length > ANEXO_QTD_MAXIMA_POR_AVALIACAO) {
+      return res
+        .status(400)
+        .json({ erro: `Máximo de ${ANEXO_QTD_MAXIMA_POR_AVALIACAO} arquivos por avaliação.` });
+    }
+
+    try {
+      const anexos = await salvarAnexos(avaliacao.id, req.files);
+      res.json({ anexos });
+    } catch (e) {
+      res.status(400).json({ erro: e.message });
+    }
+  }
+);
+
+/**
+ * GET /api/corretor/anexo/:id/conteudo
+ * Reexibe o conteúdo de um anexo através do próprio servidor (mesma
+ * origem do app), para o navegador poder buscar a imagem sem depender de
+ * CORS configurado no bucket R2 — usado ao montar o PDF do laudo.
+ */
+app.get('/api/corretor/anexo/:id/conteudo', exigirLogin, exigirAssinaturaAtiva, async (req, res) => {
+  const anexo = db
+    .prepare(
+      `SELECT a.chave, a.mime_type
+       FROM anexos a JOIN avaliacoes av ON av.id = a.avaliacao_id
+       WHERE a.id = ? AND av.usuario_id = ?`
+    )
+    .get(req.params.id, req.usuario.id);
+  if (!anexo) return res.status(404).json({ erro: 'Anexo não encontrado.' });
+
+  try {
+    const { bytes, contentType } = await baixarAnexo(anexo.chave);
+    res.setHeader('Content-Type', contentType || anexo.mime_type);
+    res.send(Buffer.from(bytes));
+  } catch {
+    res.status(500).json({ erro: 'Não foi possível carregar o anexo.' });
+  }
+});
+
 /* ══════════════════════════════════════════════════════════════════
    ASSINATURA
    ══════════════════════════════════════════════════════════════════ */
@@ -366,14 +568,17 @@ app.post('/api/assinatura/criar', exigirLogin, (req, res) => {
   if (plano === 'mensal') proxima.setMonth(proxima.getMonth() + 1);
   else proxima.setFullYear(proxima.getFullYear() + 1);
 
-  db.prepare(
-    `UPDATE assinaturas SET status='cancelada' WHERE usuario_id=? AND status='ativa'`
-  ).run(req.usuario.id);
+  const ativarAssinatura = db.transaction(() => {
+    db.prepare(
+      `UPDATE assinaturas SET status='cancelada' WHERE usuario_id=? AND status='ativa'`
+    ).run(req.usuario.id);
 
-  db.prepare(
-    `INSERT INTO assinaturas (usuario_id, plano, status, valor_centavos, gateway, proxima_cobranca)
-     VALUES (?, ?, 'ativa', ?, 'STUB-SEM-COBRANCA', ?)`
-  ).run(req.usuario.id, plano, valores[plano], proxima.toISOString().slice(0, 10));
+    db.prepare(
+      `INSERT INTO assinaturas (usuario_id, plano, status, valor_centavos, gateway, proxima_cobranca)
+       VALUES (?, ?, 'ativa', ?, 'STUB-SEM-COBRANCA', ?)`
+    ).run(req.usuario.id, plano, valores[plano], proxima.toISOString().slice(0, 10));
+  });
+  ativarAssinatura();
 
   res.json({ ok: true, plano, aviso: 'Assinatura ativada sem cobrança (ambiente de teste).' });
 });
@@ -417,6 +622,15 @@ app.post('/api/admin/indice', exigirLogin, exigirAdmin, (req, res) => {
   const { dataReferencia, regiao, tipoImovel, valorM2 } = req.body;
   if (!dataReferencia || !regiao || !tipoImovel || !valorM2) {
     return res.status(400).json({ erro: 'Preencha todos os campos do índice.' });
+  }
+  if (!REGIOES_VALIDAS.has(regiao)) {
+    return res.status(400).json({ erro: 'Região inválida.' });
+  }
+  if (!TIPOS_VALIDOS.has(tipoImovel)) {
+    return res.status(400).json({ erro: 'Tipo de imóvel inválido.' });
+  }
+  if (!Number.isFinite(Number(valorM2)) || Number(valorM2) <= 0) {
+    return res.status(400).json({ erro: 'Valor do m² deve ser um número positivo.' });
   }
   db.prepare(
     `INSERT INTO indices_fipezap (data_referencia, regiao, tipo_imovel, valor_m2, atualizado_por)
@@ -477,6 +691,21 @@ if (existsSync(distDir)) {
     res.sendFile(join(distDir, 'index.html'));
   });
 }
+
+// Erros do multer (arquivo grande demais, excesso de arquivos) chegam aqui
+// como exceção — sem isso, o cliente recebe um 500 genérico em vez da
+// mensagem específica.
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const mensagens = {
+      LIMIT_FILE_SIZE: `Arquivo muito grande. O limite é ${ANEXO_TAMANHO_MAXIMO / 1024 / 1024}MB por arquivo.`,
+      LIMIT_FILE_COUNT: `Você pode enviar no máximo ${ANEXO_QTD_MAXIMA_POR_AVALIACAO} arquivos.`,
+      LIMIT_UNEXPECTED_FILE: `Você pode enviar no máximo ${ANEXO_QTD_MAXIMA_POR_AVALIACAO} arquivos.`,
+    };
+    return res.status(400).json({ erro: mensagens[err.code] || 'Falha no envio do arquivo.' });
+  }
+  next(err);
+});
 
 app.listen(PORT, () => {
   console.log(`API rodando em http://localhost:${PORT}`);

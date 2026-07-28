@@ -8,6 +8,7 @@ import { api } from '../lib/api.js';
 import { formatarBRL, formatarDataReferencia } from '../lib/motorFipeZap.js';
 import { DISCLAIMER_ESTIMATIVA, TEXTO_LGPD, AVISO_FALLBACK } from '../lib/disclaimers.js';
 import { LISTA_BAIRROS, TIPOS_IMOVEL, PADROES, IDADES, rotuloArea } from '../data/indiceFipeZap.js';
+import UploadAnexos from '../components/UploadAnexos.jsx';
 
 const INICIAL = {
   tipo: 'apartamento', bairro: '', area: '', areaTotal: '', quartos: '', vagas: '0',
@@ -22,6 +23,7 @@ export default function Estimativa() {
   const [resultado, setResultado] = useState(null);
   const [erro, setErro] = useState('');
   const [carregando, setCarregando] = useState(false);
+  const [anexos, setAnexos] = useState([]);
 
   const ehTerreno = imovel.tipo === 'terreno';
   const ehCasa = imovel.tipo === 'casa';
@@ -74,6 +76,7 @@ export default function Estimativa() {
     setContato({ nome: '', email: '', telefone: '' });
     setAceite(false);
     setResultado(null);
+    setAnexos([]);
     setEtapa('imovel');
   }
 
@@ -127,6 +130,22 @@ export default function Estimativa() {
             </tbody>
           </table>
         </details>
+
+        {/* Fotos do imóvel — ajuda o corretor a avaliar o contato */}
+        <div className="cartao" style={{ marginTop: 'var(--e-6)' }}>
+          <h3 style={{ marginBottom: 'var(--e-2)', fontSize: 'var(--t-base)' }}>
+            Tem fotos do imóvel?
+          </h3>
+          <p style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-3)' }}>
+            Opcional: anexar fotos ajuda o corretor a te dar um retorno melhor quando entrar em contato.
+          </p>
+          <UploadAnexos
+            enviar={(arquivos) => api.anexarEstimativa(resultado.avaliacaoId, arquivos)}
+            anexos={anexos}
+            setAnexos={setAnexos}
+            rotulo="Fotos do imóvel (opcional)"
+          />
+        </div>
 
         {/* Upsell do laudo */}
         <div className="cartao" style={{ marginTop: 'var(--e-8)', borderLeft: '3px solid var(--selo)' }}>

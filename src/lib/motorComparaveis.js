@@ -4,14 +4,18 @@
  * Item 3.2 do briefing técnico. Área paga (corretores CRECI).
  *
  * Inspirado no método comparativo direto de dados de mercado
- * (ABNT NBR 14653). Seleciona comparáveis, homogeneíza por fatores de
- * ajuste, trata outliers e devolve valor com intervalo de confiança.
+ * (ABNT NBR 14653). Seleciona comparáveis do mesmo bairro do avaliando,
+ * descarta o mais caro e o mais barato do grupo, remove quem ainda ficar
+ * fora de uma faixa de oscilação aceitável e devolve o valor médio
+ * ponderado com intervalo de confiança.
  *
  * ─────────────────────────────────────────────────────────────────────
  * ATENÇÃO DESENVOLVEDOR — PONTO DE INTEGRAÇÃO PENDENTE
  *
  * A função buscarComparaveis() está SIMULADA com dados de exemplo.
- * Em produção deve consumir uma API de busca web legítima.
+ * Em produção deve consumir uma API de busca web legítima, restrita ao
+ * bairro do imóvel avaliando (não expandir para bairros vizinhos —
+ * decisão de produto).
  *
  * É VEDADO fazer scraping de portais imobiliários (ZAP, VivaReal, OLX).
  * Ver item 6.1 do briefing: risco jurídico e violação de termos de uso.
@@ -21,7 +25,20 @@
  * ─────────────────────────────────────────────────────────────────────
  */
 
-const QTD_COMPARAVEIS = 4;
+// Quantos comparáveis (dentre os mais similares) entram na análise antes
+// do descarte de extremos. Com 6, o fluxo típico vira: 6 → descarta o
+// mais caro e o mais barato → 4 usados na média ponderada.
+const QTD_ALVO_COMPARAVEIS = 6;
+
+// Faixa de oscilação aceitável em torno da média do grupo (depois de já
+// descartados os dois extremos). Quem ficar fora é excluído também.
+const LIMITE_OSCILACAO_GRUPO = 0.15;
+
+// Faixa mínima e máxima exibida ao usuário/laudo, calculada a partir da
+// dispersão real dos comparáveis usados (nunca menor que o piso, nunca
+// maior que o teto).
+const MARGEM_MINIMA = 0.08;
+const MARGEM_MAXIMA = 0.15;
 
 /**
  * Pesos de similaridade. Somam 1,0.
@@ -38,9 +55,9 @@ const PESOS_SIMILARIDADE = {
 /**
  * BUSCA DE COMPARÁVEIS — SIMULADA
  *
- * Retorna imóveis semelhantes ao avaliando. Cada comparável DEVE trazer
- * a fonte, para que o corretor veja de onde veio o dado (exigência de
- * transparência, item 3.2 do briefing).
+ * Retorna imóveis semelhantes ao avaliando, dentro do mesmo bairro. Cada
+ * comparável DEVE trazer a fonte, para que o corretor veja de onde veio
+ * o dado (exigência de transparência, item 3.2 do briefing).
  */
 export async function buscarComparaveis(avaliando) {
   // Simulação: gera comparáveis em torno do imóvel avaliando, com
@@ -89,25 +106,45 @@ export function calcularSimilaridade(avaliando, comp) {
 }
 
 /**
- * Remove outliers pelo critério de amplitude interquartil (IQR).
- * Anúncio com preço fora da curva distorce a média e é comum no mercado
- * (imóvel com preço "de sonho" ou erro de digitação).
+ * Descarta o comparável mais caro e o mais barato do grupo (R$/m²).
+ * Só descarta se houver massa suficiente (mínimo 4) para o corte de
+ * dois extremos ainda deixar uma amostra útil.
  */
-export function removerOutliers(comparaveis) {
+export function descartarExtremos(comparaveis) {
   if (comparaveis.length < 4) return { mantidos: comparaveis, removidos: [] };
 
-  const valores = comparaveis.map((c) => c.valorM2).sort((a, b) => a - b);
-  const q1 = valores[Math.floor(valores.length * 0.25)];
-  const q3 = valores[Math.floor(valores.length * 0.75)];
-  const iqr = q3 - q1;
-  const limiteInferior = q1 - 1.5 * iqr;
-  const limiteSuperior = q3 + 1.5 * iqr;
+  const ordenados = [...comparaveis].sort((a, b) => a.valorM2 - b.valorM2);
+  const maisBarato = ordenados[0];
+  const maisCaro = ordenados[ordenados.length - 1];
+
+  const mantidos = comparaveis.filter((c) => c !== maisBarato && c !== maisCaro);
+  const removidos = [maisBarato, maisCaro].map((c) => ({
+    ...c,
+    motivoExclusao: 'Extremo de preço (o mais caro ou o mais barato do grupo)',
+  }));
+
+  return { mantidos, removidos };
+}
+
+/**
+ * Remove quem ficar fora de ±15% da média do grupo restante (depois do
+ * descarte dos extremos). Garante que a faixa final reflete apenas
+ * comparáveis com preço razoavelmente próximo entre si.
+ */
+export function filtrarForaDaFaixa(comparaveis, limite = LIMITE_OSCILACAO_GRUPO) {
+  if (comparaveis.length === 0) return { mantidos: comparaveis, removidos: [] };
+
+  const media = comparaveis.reduce((s, c) => s + c.valorM2, 0) / comparaveis.length;
 
   const mantidos = [];
   const removidos = [];
   for (const c of comparaveis) {
-    if (c.valorM2 < limiteInferior || c.valorM2 > limiteSuperior) {
-      removidos.push({ ...c, motivoExclusao: 'Outlier (critério IQR)' });
+    const desvio = Math.abs(c.valorM2 - media) / media;
+    if (desvio > limite) {
+      removidos.push({
+        ...c,
+        motivoExclusao: `Fora da faixa de ±${Math.round(limite * 100)}% da média do grupo`,
+      });
     } else {
       mantidos.push(c);
     }
@@ -123,7 +160,9 @@ export function removerOutliers(comparaveis) {
  *                (o corretor pode editar a seleção — item 3.2 do briefing)
  */
 export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null) {
-  // 1. Obter candidatos
+  // 1. Obter candidatos (sempre restritos ao bairro do avaliando — a
+  //    busca simulada/real já parte desse recorte, não há expansão para
+  //    bairros vizinhos)
   let candidatos = comparaveisManuais || (await buscarComparaveis(avaliando));
 
   // 2. Calcular valor por m² e similaridade de cada um
@@ -133,28 +172,37 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
     similaridade: calcularSimilaridade(avaliando, c),
   }));
 
-  // 3. Remover outliers
-  const { mantidos, removidos } = removerOutliers(candidatos);
+  // 3. Manter só os mais similares (alvo de 6) — o resto nem entra na
+  //    análise de preço, é descartado por falta de semelhança mesmo
+  const ordenadosPorSimilaridade = [...candidatos].sort((a, b) => b.similaridade - a.similaridade);
+  const preSelecionados = ordenadosPorSimilaridade.slice(0, QTD_ALVO_COMPARAVEIS);
+  const descartadosPorSimilaridade = ordenadosPorSimilaridade
+    .slice(QTD_ALVO_COMPARAVEIS)
+    .map((c) => ({
+      ...c,
+      motivoExclusao: `Fora dos ${QTD_ALVO_COMPARAVEIS} comparáveis mais similares`,
+    }));
 
-  // 4. Selecionar os N mais similares
-  const selecionados = mantidos
-    .sort((a, b) => b.similaridade - a.similaridade)
-    .slice(0, QTD_COMPARAVEIS);
+  // 4. Descartar o mais caro e o mais barato do grupo pré-selecionado
+  const { mantidos: semExtremos, removidos: extremos } = descartarExtremos(preSelecionados);
+
+  // 5. Do que sobrou, remover quem ainda estiver fora de ±15% da média
+  const { mantidos: selecionados, removidos: foraDaFaixa } = filtrarForaDaFaixa(semExtremos);
 
   if (selecionados.length === 0) {
     throw new Error('Nenhum comparável válido encontrado para este imóvel.');
   }
 
-  // 5. Média ponderada pela similaridade
+  // 6. Média ponderada pela similaridade
   const somaPesos = selecionados.reduce((s, c) => s + c.similaridade, 0);
   const valorM2Ponderado =
     selecionados.reduce((s, c) => s + c.valorM2 * c.similaridade, 0) / somaPesos;
 
   const valorEstimado = valorM2Ponderado * avaliando.area;
 
-  // 6. Intervalo de confiança pelo desvio-padrão da amostra.
-  //    Amostra dispersa = intervalo largo. Isso é honesto: significa que
-  //    o mercado naquele recorte não é homogêneo.
+  // 7. Intervalo de confiança pelo desvio-padrão da amostra usada.
+  //    Amostra dispersa = intervalo mais largo, mas nunca fora do piso
+  //    de 8% nem do teto de 15%.
   const media = selecionados.reduce((s, c) => s + c.valorM2, 0) / selecionados.length;
   const variancia =
     selecionados.reduce((s, c) => s + Math.pow(c.valorM2 - media, 2), 0) /
@@ -162,8 +210,7 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
   const desvioPadrao = Math.sqrt(variancia);
   const coefVariacao = desvioPadrao / media;
 
-  // Intervalo mínimo de 8%, ampliado pela dispersão da amostra
-  const margem = Math.max(0.08, coefVariacao);
+  const margem = Math.min(MARGEM_MAXIMA, Math.max(MARGEM_MINIMA, coefVariacao));
 
   return {
     valorEstimado: Math.round(valorEstimado),
@@ -175,7 +222,9 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
 
     // MEMÓRIA DE CÁLCULO — registro auditável (item 3.2 do briefing)
     memoriaCalculo: {
-      metodo: 'Comparação direta de dados de mercado (média ponderada por similaridade)',
+      metodo:
+        'Comparação direta de dados de mercado dentro do bairro: descarte do mais caro/mais ' +
+        'barato, filtro de ±15% da média do grupo e média ponderada por similaridade do restante',
       qtdCandidatos: candidatos.length,
       qtdSelecionados: selecionados.length,
       comparaveisUsados: selecionados.map((c) => ({
@@ -189,7 +238,7 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
         urlFonte: c.urlFonte,
         dataColeta: c.dataColeta,
       })),
-      comparaveisExcluidos: removidos.map((c) => ({
+      comparaveisExcluidos: [...descartadosPorSimilaridade, ...extremos, ...foraDaFaixa].map((c) => ({
         endereco: c.endereco,
         valorM2: c.valorM2,
         motivo: c.motivoExclusao,

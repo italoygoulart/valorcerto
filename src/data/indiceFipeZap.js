@@ -20,7 +20,7 @@ export const DATA_REFERENCIA = '2026-06';
 // Margem de erro declarada da estimativa.
 // A estimativa gratuita é referencial: sempre exibida como FAIXA, nunca
 // como número exato. Ver disclaimers em src/lib/disclaimers.js
-export const MARGEM_ERRO = 0.15; // ±15%
+export const MARGEM_ERRO = 0.08; // ±8%
 
 /**
  * MAPEAMENTO BAIRRO → REGIÃO DE REFERÊNCIA

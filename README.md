@@ -38,8 +38,9 @@ própria tela — ele nasce sem assinatura e cai na tela de planos.
 ```
 server/
   index.js       API Express — todas as rotas
-  db.js          Schema SQLite (8 tabelas)
+  db.js          Schema SQLite (9 tabelas)
   auth.js        JWT, hash de senha, gate de assinatura
+  storage.js     Upload/download/URL assinada no Cloudflare R2
   seed.js        Usuários iniciais
   avalia.db      Banco (criado na primeira execução)
 
@@ -47,8 +48,10 @@ src/
   lib/
     motorFipeZap.js      Motor da estimativa gratuita
     motorComparaveis.js  Motor de avaliação por comparáveis
+    gerarPTAM.js         Gera o laudo PTAM em PDF (pdfMake), com anexo fotográfico
     disclaimers.js       Textos jurídicos obrigatórios
     api.js               Cliente HTTP
+    __tests__/           Testes dos dois motores (node --test)
   data/
     indiceFipeZap.js     Índices, mapa de bairros e fatores de ajuste
   pages/
@@ -58,6 +61,7 @@ src/
     Admin.jsx            Leads, métricas e atualização do índice
   components/
     Layout.jsx           Cabeçalho, rodapé e navegação
+    UploadAnexos.jsx     Upload de fotos/documentos (proprietário e corretor)
   styles/
     global.css           Design system (todas as variáveis)
 ```
@@ -72,23 +76,78 @@ Cruza tipo de imóvel, região (derivada do bairro), área, padrão de
 acabamento, idade e vagas. **Sempre devolve uma faixa**, nunca um número
 exato — precisão aparente que o método não tem seria desonesta.
 
-Quando o bairro não está mapeado, o sistema cai numa região de referência
-e **amplia a margem de erro em 50%**, sinalizando isso ao usuário.
+Margem declarada: **±8%** (±12% quando o bairro não está mapeado e o
+sistema cai numa região de referência — sinalizado ao usuário).
 
 ### Avaliação por comparáveis — `src/lib/motorComparaveis.js`
 
-M�todo comparativo direto de dados de mercado. Seleciona candidatos,
-calcula similaridade ponderada (distância 40%, área 30%, padrão 20%,
-idade 10%), remove outliers pelo critério IQR e devolve valor com
-intervalo de confiança.
+Método comparativo direto de dados de mercado, **restrito ao bairro do
+imóvel avaliando** (não expande para bairros vizinhos). O fluxo:
 
-O intervalo **cresce quando os comparáveis são dispersos** — isso é
-proposital: dispersão alta significa mercado heterogêneo naquele recorte,
-e o resultado deve refletir essa incerteza.
+1. Seleciona os **6 comparáveis mais similares** (similaridade ponderada:
+   distância 40%, área 30%, padrão 20%, idade 10%) — o resto é descartado
+   por falta de semelhança.
+2. Descarta o **mais caro** e o **mais barato** desse grupo.
+3. Do que sobrar, remove quem ainda ficar fora de **±15% da média do
+   grupo**.
+4. Calcula o valor final pela **média ponderada por similaridade** dos
+   comparáveis que restaram.
+
+A faixa mínimo–máximo exibida reflete a dispersão real desse grupo final,
+com piso de 8% e teto de 15% — nunca mais estreita nem mais larga que
+isso.
 
 Toda avaliação grava uma **memória de cálculo** auditável: entradas,
-comparáveis usados, os que foram excluídos e por quê, pesos aplicados e
-fórmula. Isso é requisito de credibilidade profissional.
+comparáveis usados, os que foram excluídos e por quê (falta de
+similaridade, extremo de preço ou fora da faixa de ±15%), pesos aplicados
+e fórmula. Isso é requisito de credibilidade profissional.
+
+### Laudo PTAM — `src/lib/gerarPTAM.js`
+
+A partir do resultado da avaliação por comparáveis, o corretor preenche os
+dados registrais e de vistoria e gera o **Parecer Técnico de Avaliação
+Mercadológica em PDF** (via `pdfMake`), já estruturado nas 9 seções da
+NBR 14.653 (Partes 1 e 2), com valor por extenso e assinatura do CRECI/CNAI.
+Diferente da estimativa gratuita, este documento **não** leva o aviso de
+"sem validade jurídica" — ele é o próprio laudo técnico.
+
+### Testes
+
+```bash
+npm test    # node --test — cobre os dois motores de cálculo
+```
+
+---
+
+## Fotos e documentos anexados
+
+Tanto o proprietário (na tela de estimativa gratuita, após ver o
+resultado) quanto o corretor (ao gerar o laudo) podem anexar **fotos do
+imóvel** e **documentos** (matrícula, IPTU etc.) — JPG, PNG, WEBP ou PDF,
+até 10MB por arquivo, no máximo 15 arquivos por avaliação.
+
+Os arquivos ficam no **Cloudflare R2** (compatível com S3), num bucket
+**privado** — nunca há URL pública direta. Toda leitura passa por URL
+assinada de validade curta (`server/storage.js`), e o laudo PTAM busca as
+fotos através de uma rota própria da API (autenticada), não diretamente
+do bucket, para não depender de CORS configurado no R2.
+
+Variáveis de ambiente necessárias (`.env`, nunca commitado):
+
+```
+R2_ACCOUNT_ID=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
+R2_BUCKET=...
+```
+
+Gere o Access Key ID/Secret em **Cloudflare Dashboard → R2 Object Storage
+→ (dentro do bucket) → Settings → S3 API Compatibility → Manage API
+tokens**, com permissão de leitura e escrita.
+
+As fotos do laudo entram automaticamente numa seção **"Anexo
+Fotográfico"** do PDF gerado.
 
 ---
 
@@ -99,7 +158,9 @@ fórmula. Isso é requisito de credibilidade profissional.
 A função `buscarComparaveis()` está **simulada**. Gera dados de exemplo
 em torno do imóvel avaliando.
 
-Em produção, deve consumir uma **API de busca web legítima**.
+Em produção, deve consumir uma **API de busca web legítima**, restrita ao
+**bairro do imóvel avaliando** (decisão de produto: não expandir a busca
+para bairros vizinhos).
 
 > **É vedado fazer scraping de portais imobiliários** (ZAP, VivaReal,
 > OLX). Risco jurídico e violação de termos de uso. Esta restrição não é
@@ -130,7 +191,6 @@ agrupamento impacta diretamente a credibilidade da estimativa.
 ### Outros pontos
 
 - Notificação de novo lead ao corretor (e-mail/WhatsApp) — marcada com TODO
-- Exportação em PDF estruturado (hoje usa `window.print()`)
 - Validação real de CRECI junto ao COFECI (hoje valida só o formato)
 - Número de WhatsApp na tela de resultado está como placeholder
 
@@ -155,7 +215,7 @@ SQLite, escolhido pela simplicidade no MVP. O schema em `server/db.js` é
 compatível com PostgreSQL — a migração é direta quando o volume exigir.
 
 Tabelas: `usuarios`, `consentimentos_lgpd`, `imoveis`, `avaliacoes`,
-`memorias_calculo`, `comparaveis`, `assinaturas`, `indices_fipezap`.
+`memorias_calculo`, `comparaveis`, `assinaturas`, `indices_fipezap`, `anexos`.
 
 ---
 
@@ -165,4 +225,9 @@ Frontend: Vercel ou Netlify (build estático via `npm run build`).
 API: Railway, Render ou Fly.io.
 
 Definir `JWT_SECRET` nas variáveis de ambiente — o fallback em
-`server/auth.js` serve apenas para desenvolvimento.
+`server/auth.js` serve apenas para desenvolvimento. Com `NODE_ENV=production`
+e sem essa variável, o servidor **recusa subir** (falha no boot) em vez de
+usar o fallback silenciosamente.
+
+Também definir as variáveis `R2_*` (ver seção "Fotos e documentos
+anexados") para o upload funcionar em produção.

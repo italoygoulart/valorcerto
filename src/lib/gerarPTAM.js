@@ -12,6 +12,7 @@ import pdfMake from 'pdfmake/build/pdfmake';
 import pdfFonts from 'pdfmake/build/vfs_fonts';
 import { formatarBRL } from './motorFipeZap.js';
 import { rotuloArea } from '../data/indiceFipeZap.js';
+import { getToken } from './api.js';
 
 pdfMake.vfs = pdfFonts.pdfMake ? pdfFonts.pdfMake.vfs : pdfFonts;
 
@@ -75,14 +76,64 @@ const linha = (rotulo, valor) => ({
   margin: [0, 0, 0, 6],
 });
 
+/** Converte o conteúdo de uma resposta fetch em data URI base64, formato que o pdfMake aceita como imagem. */
+async function respostaParaDataUri(resp) {
+  const blob = await resp.blob();
+  const buffer = await blob.arrayBuffer();
+  let binario = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) binario += String.fromCharCode(bytes[i]);
+  return `data:${blob.type};base64,${btoa(binario)}`;
+}
+
+/**
+ * Busca as fotos anexadas (via rota própria da API, autenticada) e monta
+ * os blocos de imagem do PDF, 2 por linha. Foto que falhar ao carregar é
+ * simplesmente omitida — não trava a geração do laudo.
+ */
+async function montarAnexoFotografico(fotos) {
+  if (!fotos || fotos.length === 0) return [];
+
+  const imagens = [];
+  for (const foto of fotos) {
+    try {
+      const resp = await fetch(foto.urlConteudo, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (!resp.ok) continue;
+      const dataUri = await respostaParaDataUri(resp);
+      imagens.push({
+        stack: [
+          { image: dataUri, width: 230 },
+          { text: foto.nomeOriginal, fontSize: 8, color: '#666', alignment: 'center', margin: [0, 2, 0, 0] },
+        ],
+      });
+    } catch {
+      // segue sem essa foto
+    }
+  }
+
+  if (imagens.length === 0) return [];
+
+  const linhas = [];
+  for (let i = 0; i < imagens.length; i += 2) {
+    linhas.push({ columns: imagens.slice(i, i + 2), columnGap: 10, margin: [0, 0, 0, 10] });
+  }
+  return linhas;
+}
+
 /**
  * @param {Object} dados - ver PainelCorretor.jsx para o formato montado
  */
-export function gerarPTAM(dados) {
+export async function gerarPTAM(dados) {
   const {
     avaliador, solicitante, finalidade, objetivo, imovel,
-    diagnosticoMercado, resultado, grauFundamentacao, grauPrecisao, dataVistoria,
+    diagnosticoMercado, resultado, grauFundamentacao, grauPrecisao, dataVistoria, fotos,
   } = dados;
+
+  const linhasAnexoFotografico = await montarAnexoFotografico(fotos);
+  const temAnexoFotografico = linhasAnexoFotografico.length > 0;
+  const numEncerramento = temAnexoFotografico ? 10 : 9;
 
   const comparaveis = resultado.memoriaCalculo.comparaveisUsados;
   const enderecoCompleto = [imovel.endereco, imovel.bairro && `Bairro ${imovel.bairro}`, 'Goiânia-GO']
@@ -201,7 +252,11 @@ export function gerarPTAM(dados) {
         margin: [0, 0, 0, 6], alignment: 'justify',
       },
 
-      { text: '9. ENCERRAMENTO E RESPONSABILIDADE TÉCNICA', style: 'secao' },
+      ...(temAnexoFotografico
+        ? [{ text: '9. ANEXO FOTOGRÁFICO', style: 'secao', pageBreak: 'before' }, ...linhasAnexoFotografico]
+        : []),
+
+      { text: `${numEncerramento}. ENCERRAMENTO E RESPONSABILIDADE TÉCNICA`, style: 'secao' },
       {
         text: 'Nada mais havendo a declarar, encerra-se o presente Parecer Técnico de Avaliação ' +
           'Mercadológica, elaborado em conformidade com a NBR 14.653 da ABNT, que vai datado e assinado.',

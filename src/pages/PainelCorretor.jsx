@@ -9,6 +9,7 @@ import { formatarBRL } from '../lib/motorFipeZap.js';
 import { DISCLAIMER_COMPARAVEIS } from '../lib/disclaimers.js';
 import { LISTA_BAIRROS, TIPOS_IMOVEL, PADROES, IDADES, rotuloArea } from '../data/indiceFipeZap.js';
 import { gerarPTAM } from '../lib/gerarPTAM.js';
+import UploadAnexos from '../components/UploadAnexos.jsx';
 
 const ESTADOS_CONSERVACAO = ['Novo', 'Seminovo', 'Usado', 'Ocupado'];
 const GRAUS = ['Grau I', 'Grau II', 'Grau III'];
@@ -34,6 +35,7 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
   const [carregando, setCarregando] = useState(false);
   const [gerandoLaudo, setGerandoLaudo] = useState(false);
   const [erroLaudo, setErroLaudo] = useState('');
+  const [anexos, setAnexos] = useState([]);
   const [laudo, setLaudo] = useState({
     solicitanteNome: '', solicitanteCpf: '', finalidade: '', objetivo: '',
     matricula: '', inscricaoCadastral: '', fracaoIdeal: '', vagaGaragem: '',
@@ -100,6 +102,7 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
     }
     setCarregando(true);
     setResultado(null);
+    setAnexos([]);
     try {
       const r = await api.avaliar({
         imovel: {
@@ -125,7 +128,8 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
     setGerandoLaudo(true);
     try {
       await api.salvarLaudo(resultado.avaliacaoId, laudo);
-      gerarPTAM({
+      await gerarPTAM({
+        fotos: anexos.filter((a) => a.tipo === 'foto'),
         avaliador: { nome: usuario.nome, creci: usuario.creci, cnai: usuario.cnai, email: usuario.email },
         solicitante: { nome: laudo.solicitanteNome, cpf: laudo.solicitanteCpf },
         finalidade: laudo.finalidade,
@@ -456,6 +460,16 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
                     </select>
                   </div>
                 </div>
+
+                <UploadAnexos
+                  enviar={(arquivos) => api.anexarAvaliacao(resultado.avaliacaoId, arquivos)}
+                  anexos={anexos}
+                  setAnexos={setAnexos}
+                  rotulo="Fotos do imóvel e documentos (matrícula, IPTU etc.)"
+                />
+                <p style={{ fontSize: 'var(--t-xs)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-4)' }}>
+                  As fotos entram automaticamente no anexo fotográfico do PDF.
+                </p>
 
                 {erroLaudo && <div className="aviso aviso-erro" style={{ marginBottom: 'var(--e-4)' }}>{erroLaudo}</div>}
                 <button className="btn" style={{ width: '100%' }} disabled={gerandoLaudo} onClick={gerarLaudo}>

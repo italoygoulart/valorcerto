@@ -10,7 +10,14 @@ import bcrypt from 'bcryptjs';
 import db from './db.js';
 
 // ATENÇÃO DEPLOY: definir JWT_SECRET nas variáveis de ambiente.
-// O valor abaixo é apenas fallback de desenvolvimento.
+// Em produção, subir sem essa variável é um risco de segurança grave (o
+// fallback abaixo é público, qualquer um poderia forjar um token de admin),
+// então falhamos o boot em vez de degradar silenciosamente.
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error(
+    'JWT_SECRET não definido em produção. Configure a variável de ambiente antes de iniciar o servidor.'
+  );
+}
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-trocar-em-producao';
 const EXPIRACAO = '7d';
 
