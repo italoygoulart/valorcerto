@@ -1,11 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  calcularSimilaridade,
-  descartarExtremos,
-  filtrarForaDaFaixa,
-  avaliarPorComparaveis,
-} from '../motorComparaveis.js';
+import { calcularSimilaridade } from '../avaliacao/similaridade.js';
+import { descartarExtremos, filtrarForaDaFaixa } from '../avaliacao/outliers.js';
+import { avaliarPorComparaveis } from '../motorComparaveis.js';
 
 const AVALIANDO = {
   tipo: 'apartamento', bairro: 'Setor Bueno', area: 100, padrao: 'medio', idade: 'seminovo', vagas: 1,
@@ -22,9 +19,11 @@ function comparavelManual({
 
 describe('calcularSimilaridade', () => {
   test('comparável idêntico e colado (0 km) tem similaridade máxima (1.0)', () => {
+    const dataReferencia = new Date('2026-06-15');
     const s = calcularSimilaridade(AVALIANDO, {
       area: 100, padrao: 'medio', idade: 'seminovo', distanciaKm: 0,
-    });
+      vagas: 1, dataColeta: '2026-06-15',
+    }, dataReferencia);
     assert.ok(Math.abs(s - 1) < 1e-9);
   });
 
@@ -44,6 +43,58 @@ describe('calcularSimilaridade', () => {
       const s = calcularSimilaridade(AVALIANDO, c);
       assert.ok(s >= 0 && s <= 1);
     }
+  });
+
+  test('padrão: distância ordinal — 1 degrau de diferença pesa menos que 3 degraus', () => {
+    const base = { area: 100, idade: 'seminovo', distanciaKm: 0, vagas: 1 };
+    const avaliandoSimples = { ...AVALIANDO, padrao: 'simples' };
+    const umDegrau = calcularSimilaridade(avaliandoSimples, { ...base, padrao: 'medio' });
+    const tresDegraus = calcularSimilaridade(avaliandoSimples, { ...base, padrao: 'luxo' });
+    assert.ok(umDegrau > tresDegraus);
+  });
+
+  test('idade: distância ordinal — novo vs seminovo é mais parecido que novo vs antigo', () => {
+    const base = { area: 100, padrao: 'medio', distanciaKm: 0, vagas: 1 };
+    const avaliandoNovo = { ...AVALIANDO, idade: 'novo' };
+    const proximo = calcularSimilaridade(avaliandoNovo, { ...base, idade: 'seminovo' });
+    const distante = calcularSimilaridade(avaliandoNovo, { ...base, idade: 'antigo' });
+    assert.ok(proximo > distante);
+  });
+
+  test('vagas: quanto maior a diferença de vagas, menor a similaridade', () => {
+    const base = { area: 100, padrao: 'medio', idade: 'seminovo', distanciaKm: 0 };
+    // AVALIANDO.vagas = 1
+    const mesmaQtd = calcularSimilaridade(AVALIANDO, { ...base, vagas: 1 });
+    const umaDiferenca = calcularSimilaridade(AVALIANDO, { ...base, vagas: 0 });
+    const duasDiferenca = calcularSimilaridade(AVALIANDO, { ...base, vagas: 3 });
+    assert.ok(mesmaQtd > umaDiferenca);
+    assert.ok(umaDiferenca > duasDiferenca);
+  });
+
+  test('recência: anúncio recente tem similaridade maior que anúncio antigo', () => {
+    const base = { area: 100, padrao: 'medio', idade: 'seminovo', distanciaKm: 0, vagas: 1 };
+    const dataReferencia = new Date('2026-06-15');
+    const recente = calcularSimilaridade(
+      AVALIANDO, { ...base, dataColeta: '2026-06-10' }, dataReferencia
+    );
+    const antigo = calcularSimilaridade(
+      AVALIANDO, { ...base, dataColeta: '2026-01-01' }, dataReferencia
+    );
+    assert.ok(recente > antigo);
+  });
+
+  test('recência: anúncio com mais de 90 dias não perde similaridade além do piso do peso', () => {
+    const base = { area: 100, padrao: 'medio', idade: 'seminovo', distanciaKm: 0, vagas: 1 };
+    const dataReferencia = new Date('2026-06-15');
+    const muitoAntigo = calcularSimilaridade(
+      AVALIANDO, { ...base, dataColeta: '2025-01-01' }, dataReferencia
+    );
+    const noLimite = calcularSimilaridade(
+      AVALIANDO, { ...base, dataColeta: '2026-03-01' }, dataReferencia
+    );
+    // Além de ~90 dias, a similaridade de recência já bateu no piso (0);
+    // não deve continuar caindo depois disso.
+    assert.ok(Math.abs(muitoAntigo - noLimite) < 0.01);
   });
 });
 

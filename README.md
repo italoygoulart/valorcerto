@@ -47,11 +47,15 @@ server/
 src/
   lib/
     motorFipeZap.js      Motor da estimativa gratuita
-    motorComparaveis.js  Motor de avaliação por comparáveis
+    motorComparaveis.js  Orquestrador da avaliação por comparáveis
+    avaliacao/
+      similaridade.js    SimilarityEngine — pontua o quão parecido é um comparável
+      outliers.js        OutlierDetector — descarte de extremos e filtro de faixa
+      confianca.js       ConfidenceEngine — margem e grau de confiança
     gerarPTAM.js         Gera o laudo PTAM em PDF (pdfMake), com anexo fotográfico
     disclaimers.js       Textos jurídicos obrigatórios
     api.js               Cliente HTTP
-    __tests__/           Testes dos dois motores (node --test)
+    __tests__/           Testes dos motores e módulos de avaliação (node --test)
   data/
     indiceFipeZap.js     Índices, mapa de bairros e fatores de ajuste
   pages/
@@ -82,25 +86,35 @@ sistema cai numa região de referência — sinalizado ao usuário).
 ### Avaliação por comparáveis — `src/lib/motorComparaveis.js`
 
 Método comparativo direto de dados de mercado, **restrito ao bairro do
-imóvel avaliando** (não expande para bairros vizinhos). O fluxo:
+imóvel avaliando** (não expande para bairros vizinhos). `motorComparaveis.js`
+é só o orquestrador — cada responsabilidade fica num módulo dedicado em
+`src/lib/avaliacao/`:
 
-1. Seleciona os **6 comparáveis mais similares** (similaridade ponderada:
-   distância 40%, área 30%, padrão 20%, idade 10%) — o resto é descartado
-   por falta de semelhança.
-2. Descarta o **mais caro** e o **mais barato** desse grupo.
-3. Do que sobrar, remove quem ainda ficar fora de **±15% da média do
-   grupo**.
-4. Calcula o valor final pela **média ponderada por similaridade** dos
+1. **SimilarityEngine** (`avaliacao/similaridade.js`) pontua cada candidato
+   de 0 a 1: distância 35%, área 25%, padrão construtivo 15%, idade 10%,
+   vagas de garagem 8%, recência do anúncio 7%. Padrão e idade usam
+   **distância ordinal** (ex.: "simples→médio" é mais parecido que
+   "simples→luxo", não um simples igual/diferente). Só entram na análise
+   os **6 mais similares**.
+2. **OutlierDetector** (`avaliacao/outliers.js`) descarta o **mais caro**
+   e o **mais barato** desse grupo (aparado fixo, mais estável que IQR
+   para amostras pequenas) e depois remove quem ainda ficar fora de
+   **±15% da média do grupo**.
+3. Calcula o valor final pela **média ponderada por similaridade** dos
    comparáveis que restaram.
-
-A faixa mínimo–máximo exibida reflete a dispersão real desse grupo final,
-com piso de 8% e teto de 15% — nunca mais estreita nem mais larga que
-isso.
+4. **ConfidenceEngine** (`avaliacao/confianca.js`) traduz a dispersão da
+   amostra final em faixa (piso 8%, teto 15%) e grau de confiança.
 
 Toda avaliação grava uma **memória de cálculo** auditável: entradas,
 comparáveis usados, os que foram excluídos e por quê (falta de
 similaridade, extremo de preço ou fora da faixa de ±15%), pesos aplicados
 e fórmula. Isso é requisito de credibilidade profissional.
+
+Os pesos de vagas e recência do anúncio ficam "adormecidos" enquanto
+`buscarComparaveis()` for simulada (ela copia as vagas do próprio
+avaliando e usa sempre a data de hoje) — passam a diferenciar
+comparáveis assim que houver uma fonte real ou comparáveis manuais que
+variem nessas duas dimensões.
 
 ### Laudo PTAM — `src/lib/gerarPTAM.js`
 

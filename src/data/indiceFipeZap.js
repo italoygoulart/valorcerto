@@ -84,15 +84,26 @@ export const MAPA_BAIRROS = {
 /**
  * VALOR DO M² POR REGIÃO E TIPO DE IMÓVEL (R$/m²)
  *
- * VALORES DE EXEMPLO — substituir pelos reais antes do uso comercial.
+ * `apartamento`: ANCORADO NO DADO REAL. O FipeZAP publica, para Goiânia,
+ * só um índice único da cidade (sem quebra por bairro/região — conferido
+ * direto na planilha oficial: https://downloads.fipe.org.br/indices/fipezap/fipezap-serieshistoricas.xlsx,
+ * aba "Goiânia"). Preço médio de venda, junho/2026: R$ 8.352/m² (Total).
+ * Os valores abaixo preservam a diferença relativa entre regiões que já
+ * existia (Alto padrão bem acima da média, Norte/Oeste abaixo), mas
+ * reescalados para que a média das 6 regiões bata com esse número real.
+ *
+ * `casa` e `terreno`: AINDA SÃO VALORES DE EXEMPLO — o FipeZAP cobre
+ * apenas apartamentos prontos, não tem nenhum dado oficial para casa ou
+ * terreno. Substituir por fonte própria (matrícula, IPTU, corretor local)
+ * antes do uso comercial.
  */
 export const VALOR_M2 = {
-  [REGIOES.ALTO_PADRAO]: { apartamento: 9800, casa: 8200, terreno: 3400 },
-  [REGIOES.CENTRAL]: { apartamento: 6400, casa: 5100, terreno: 2200 },
-  [REGIOES.NORTE]: { apartamento: 4900, casa: 4300, terreno: 1600 },
-  [REGIOES.SUL]: { apartamento: 5600, casa: 4800, terreno: 1900 },
-  [REGIOES.LESTE]: { apartamento: 5200, casa: 4500, terreno: 1750 },
-  [REGIOES.OESTE]: { apartamento: 4600, casa: 4100, terreno: 1500 },
+  [REGIOES.ALTO_PADRAO]: { apartamento: 13500, casa: 8200, terreno: 3400 },
+  [REGIOES.CENTRAL]: { apartamento: 8800, casa: 5100, terreno: 2200 },
+  [REGIOES.NORTE]: { apartamento: 6700, casa: 4300, terreno: 1600 },
+  [REGIOES.SUL]: { apartamento: 7700, casa: 4800, terreno: 1900 },
+  [REGIOES.LESTE]: { apartamento: 7100, casa: 4500, terreno: 1750 },
+  [REGIOES.OESTE]: { apartamento: 6300, casa: 4100, terreno: 1500 },
 };
 
 // Região usada quando o bairro informado não está mapeado.

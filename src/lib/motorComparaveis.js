@@ -3,11 +3,15 @@
  * ============================================
  * Item 3.2 do briefing técnico. Área paga (corretores CRECI).
  *
- * Inspirado no método comparativo direto de dados de mercado
- * (ABNT NBR 14653). Seleciona comparáveis do mesmo bairro do avaliando,
- * descarta o mais caro e o mais barato do grupo, remove quem ainda ficar
- * fora de uma faixa de oscilação aceitável e devolve o valor médio
- * ponderado com intervalo de confiança.
+ * Orquestra o método comparativo direto de dados de mercado (ABNT NBR
+ * 14653), delegando cada responsabilidade a um módulo dedicado:
+ *
+ *   - avaliacao/similaridade.js  → SimilarityEngine
+ *   - avaliacao/outliers.js      → OutlierDetector
+ *   - avaliacao/confianca.js     → ConfidenceEngine
+ *
+ * Este arquivo cuida só da orquestração (buscar candidatos → pontuar →
+ * filtrar → calcular → explicar) e da busca de comparáveis em si.
  *
  * ─────────────────────────────────────────────────────────────────────
  * ATENÇÃO DESENVOLVEDOR — PONTO DE INTEGRAÇÃO PENDENTE
@@ -24,33 +28,14 @@
  * retorno deve ser mantida para não quebrar o restante do motor.
  * ─────────────────────────────────────────────────────────────────────
  */
+import { PESOS_SIMILARIDADE, calcularSimilaridade } from './avaliacao/similaridade.js';
+import { descartarExtremos, filtrarForaDaFaixa } from './avaliacao/outliers.js';
+import { MARGEM_MINIMA, MARGEM_MAXIMA, classificarConfianca } from './avaliacao/confianca.js';
 
 // Quantos comparáveis (dentre os mais similares) entram na análise antes
 // do descarte de extremos. Com 6, o fluxo típico vira: 6 → descarta o
 // mais caro e o mais barato → 4 usados na média ponderada.
 const QTD_ALVO_COMPARAVEIS = 6;
-
-// Faixa de oscilação aceitável em torno da média do grupo (depois de já
-// descartados os dois extremos). Quem ficar fora é excluído também.
-const LIMITE_OSCILACAO_GRUPO = 0.15;
-
-// Faixa mínima e máxima exibida ao usuário/laudo, calculada a partir da
-// dispersão real dos comparáveis usados (nunca menor que o piso, nunca
-// maior que o teto).
-const MARGEM_MINIMA = 0.08;
-const MARGEM_MAXIMA = 0.15;
-
-/**
- * Pesos de similaridade. Somam 1,0.
- * Distância geográfica pesa mais: localização é o fator dominante
- * na formação de preço imobiliário.
- */
-const PESOS_SIMILARIDADE = {
-  distancia: 0.40,
-  area: 0.30,
-  padrao: 0.20,
-  idade: 0.10,
-};
 
 /**
  * BUSCA DE COMPARÁVEIS — SIMULADA
@@ -84,74 +69,6 @@ export async function buscarComparaveis(avaliando) {
   }));
 }
 
-/** Calcula quão similar um comparável é do avaliando. 0 a 1. */
-export function calcularSimilaridade(avaliando, comp) {
-  // Distância: 0 km = 1,0 / 5 km ou mais = 0
-  const sDistancia = Math.max(0, 1 - comp.distanciaKm / 5);
-
-  // Área: penaliza diferença proporcional
-  const difArea = Math.abs(comp.area - avaliando.area) / avaliando.area;
-  const sArea = Math.max(0, 1 - difArea);
-
-  // Padrão e idade: binário (igual ou diferente)
-  const sPadrao = comp.padrao === avaliando.padrao ? 1 : 0.6;
-  const sIdade = comp.idade === avaliando.idade ? 1 : 0.7;
-
-  return (
-    sDistancia * PESOS_SIMILARIDADE.distancia +
-    sArea * PESOS_SIMILARIDADE.area +
-    sPadrao * PESOS_SIMILARIDADE.padrao +
-    sIdade * PESOS_SIMILARIDADE.idade
-  );
-}
-
-/**
- * Descarta o comparável mais caro e o mais barato do grupo (R$/m²).
- * Só descarta se houver massa suficiente (mínimo 4) para o corte de
- * dois extremos ainda deixar uma amostra útil.
- */
-export function descartarExtremos(comparaveis) {
-  if (comparaveis.length < 4) return { mantidos: comparaveis, removidos: [] };
-
-  const ordenados = [...comparaveis].sort((a, b) => a.valorM2 - b.valorM2);
-  const maisBarato = ordenados[0];
-  const maisCaro = ordenados[ordenados.length - 1];
-
-  const mantidos = comparaveis.filter((c) => c !== maisBarato && c !== maisCaro);
-  const removidos = [maisBarato, maisCaro].map((c) => ({
-    ...c,
-    motivoExclusao: 'Extremo de preço (o mais caro ou o mais barato do grupo)',
-  }));
-
-  return { mantidos, removidos };
-}
-
-/**
- * Remove quem ficar fora de ±15% da média do grupo restante (depois do
- * descarte dos extremos). Garante que a faixa final reflete apenas
- * comparáveis com preço razoavelmente próximo entre si.
- */
-export function filtrarForaDaFaixa(comparaveis, limite = LIMITE_OSCILACAO_GRUPO) {
-  if (comparaveis.length === 0) return { mantidos: comparaveis, removidos: [] };
-
-  const media = comparaveis.reduce((s, c) => s + c.valorM2, 0) / comparaveis.length;
-
-  const mantidos = [];
-  const removidos = [];
-  for (const c of comparaveis) {
-    const desvio = Math.abs(c.valorM2 - media) / media;
-    if (desvio > limite) {
-      removidos.push({
-        ...c,
-        motivoExclusao: `Fora da faixa de ±${Math.round(limite * 100)}% da média do grupo`,
-      });
-    } else {
-      mantidos.push(c);
-    }
-  }
-  return { mantidos, removidos };
-}
-
 /**
  * Avaliação completa por comparação de mercado.
  *
@@ -165,7 +82,7 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
   //    bairros vizinhos)
   let candidatos = comparaveisManuais || (await buscarComparaveis(avaliando));
 
-  // 2. Calcular valor por m² e similaridade de cada um
+  // 2. Calcular valor por m² e similaridade de cada um (SimilarityEngine)
   candidatos = candidatos.map((c) => ({
     ...c,
     valorM2: Math.round(c.valorAnuncio / c.area),
@@ -183,10 +100,10 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
       motivoExclusao: `Fora dos ${QTD_ALVO_COMPARAVEIS} comparáveis mais similares`,
     }));
 
-  // 4. Descartar o mais caro e o mais barato do grupo pré-selecionado
+  // 4. Descartar o mais caro e o mais barato do grupo pré-selecionado (OutlierDetector)
   const { mantidos: semExtremos, removidos: extremos } = descartarExtremos(preSelecionados);
 
-  // 5. Do que sobrou, remover quem ainda estiver fora de ±15% da média
+  // 5. Do que sobrou, remover quem ainda estiver fora de ±15% da média (OutlierDetector)
   const { mantidos: selecionados, removidos: foraDaFaixa } = filtrarForaDaFaixa(semExtremos);
 
   if (selecionados.length === 0) {
@@ -200,9 +117,9 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
 
   const valorEstimado = valorM2Ponderado * avaliando.area;
 
-  // 7. Intervalo de confiança pelo desvio-padrão da amostra usada.
-  //    Amostra dispersa = intervalo mais largo, mas nunca fora do piso
-  //    de 8% nem do teto de 15%.
+  // 7. Intervalo de confiança pelo desvio-padrão da amostra usada
+  //    (ConfidenceEngine). Amostra dispersa = intervalo mais largo, mas
+  //    nunca fora do piso de 8% nem do teto de 15%.
   const media = selecionados.reduce((s, c) => s + c.valorM2, 0) / selecionados.length;
   const variancia =
     selecionados.reduce((s, c) => s + Math.pow(c.valorM2 - media, 2), 0) /
@@ -248,18 +165,5 @@ export async function avaliarPorComparaveis(avaliando, comparaveisManuais = null
       pesosSimilaridade: PESOS_SIMILARIDADE,
       dataCalculo: new Date().toISOString(),
     },
-  };
-}
-
-/** Classifica a confiança do resultado com base na dispersão e no tamanho da amostra. */
-function classificarConfianca(coefVariacao, qtd) {
-  if (qtd < 3) return { nivel: 'baixo', texto: 'Amostra pequena. Use com cautela.' };
-  if (coefVariacao <= 0.10)
-    return { nivel: 'alto', texto: 'Comparáveis homogêneos. Boa confiabilidade.' };
-  if (coefVariacao <= 0.20)
-    return { nivel: 'medio', texto: 'Dispersão moderada entre os comparáveis.' };
-  return {
-    nivel: 'baixo',
-    texto: 'Comparáveis muito dispersos. Revise a seleção manualmente.',
   };
 }
