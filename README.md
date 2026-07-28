@@ -125,6 +125,17 @@ NBR 14.653 (Partes 1 e 2), com valor por extenso e assinatura do CRECI/CNAI.
 Diferente da estimativa gratuita, este documento **não** leva o aviso de
 "sem validade jurídica" — ele é o próprio laudo técnico.
 
+**Fonte dos comparáveis, obrigatória.** Como `buscarComparaveis()` ainda é
+simulada (endereço e valor de cada comparável são gerados, não vêm de um
+anúncio real), o corretor precisa colar a URL de um anúncio real
+equivalente pra cada comparável usado, direto na tela de resultado, antes
+de gerar o laudo — validado tanto no front quanto no back
+(`PUT /api/corretor/avaliacao/:id/laudo`, campo `comparaveisFontes`). O
+PDF mostra a URL como link clicável abaixo do endereço de cada comparável.
+O sistema **não confere** se os números batem com o link — essa checagem
+continua sendo do corretor, até existir uma fonte de dado real
+integrada (item 1 da seção seguinte).
+
 ### Testes
 
 ```bash

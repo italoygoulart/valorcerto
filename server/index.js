@@ -377,10 +377,13 @@ app.post('/api/corretor/avaliar', exigirLogin, exigirAssinaturaAtiva, async (req
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
       );
       for (const c of resultado.memoriaCalculo.comparaveisUsados) {
-        stmt.run(
+        const r = stmt.run(
           avaliacao.lastInsertRowid, c.endereco, c.area, c.valorAnuncio,
           c.valorM2, c.distanciaKm, c.similaridade, c.fonte, c.urlFonte, c.dataColeta
         );
+        // Devolvido ao front pra ele conseguir referenciar esse comparável
+        // depois, ao preencher a URL da fonte antes de gerar o laudo.
+        c.id = r.lastInsertRowid;
       }
 
       return avaliacao.lastInsertRowid;
@@ -450,30 +453,58 @@ app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAssinaturaAtiva,
     solicitanteNome, solicitanteCpf, finalidade, objetivo, diagnosticoMercado,
     grauFundamentacao, grauPrecisao, dataVistoria,
     matricula, inscricaoCadastral, fracaoIdeal, vagaGaragem, andar,
-    dormitorios, estadoConservacao,
+    dormitorios, estadoConservacao, comparaveisFontes,
   } = req.body;
 
-  db.prepare(
-    `UPDATE avaliacoes SET
-       solicitante_nome = ?, solicitante_cpf = ?, finalidade = ?, objetivo = ?,
-       diagnostico_mercado = ?, grau_fundamentacao = ?, grau_precisao = ?, data_vistoria = ?
-     WHERE id = ?`
-  ).run(
-    solicitanteNome || null, solicitanteCpf || null, finalidade || null, objetivo || null,
-    diagnosticoMercado || null, grauFundamentacao || null, grauPrecisao || null,
-    dataVistoria || null, avaliacao.id
-  );
+  // A URL da fonte de cada comparável é obrigatória pra gerar o laudo —
+  // sem isso, o PTAM fica sem como o solicitante conferir de onde veio
+  // o dado. Validamos aqui de novo (o front já valida) porque a rota é
+  // o único ponto de gravação — não dá pra confiar só na tela.
+  if (!Array.isArray(comparaveisFontes) || comparaveisFontes.length === 0) {
+    return res.status(400).json({ erro: 'Informe a URL da fonte de cada comparável usado.' });
+  }
+  for (const { id, urlFonte } of comparaveisFontes) {
+    if (!id || !urlValida(urlFonte)) {
+      return res.status(400).json({
+        erro: 'Todas as URLs de fonte precisam ser links válidos (http:// ou https://).',
+      });
+    }
+  }
 
-  db.prepare(
-    `UPDATE imoveis SET
-       matricula = ?, inscricao_cadastral = ?, fracao_ideal = ?, vaga_garagem = ?,
-       andar = ?, dormitorios = ?, estado_conservacao = ?
-     WHERE id = ?`
-  ).run(
-    matricula || null, inscricaoCadastral || null, fracaoIdeal || null,
-    vagaGaragem || null, andar || null, dormitorios || null, estadoConservacao || null,
-    avaliacao.imovel_id
-  );
+  const salvar = db.transaction(() => {
+    db.prepare(
+      `UPDATE avaliacoes SET
+         solicitante_nome = ?, solicitante_cpf = ?, finalidade = ?, objetivo = ?,
+         diagnostico_mercado = ?, grau_fundamentacao = ?, grau_precisao = ?, data_vistoria = ?
+       WHERE id = ?`
+    ).run(
+      solicitanteNome || null, solicitanteCpf || null, finalidade || null, objetivo || null,
+      diagnosticoMercado || null, grauFundamentacao || null, grauPrecisao || null,
+      dataVistoria || null, avaliacao.id
+    );
+
+    db.prepare(
+      `UPDATE imoveis SET
+         matricula = ?, inscricao_cadastral = ?, fracao_ideal = ?, vaga_garagem = ?,
+         andar = ?, dormitorios = ?, estado_conservacao = ?
+       WHERE id = ?`
+    ).run(
+      matricula || null, inscricaoCadastral || null, fracaoIdeal || null,
+      vagaGaragem || null, andar || null, dormitorios || null, estadoConservacao || null,
+      avaliacao.imovel_id
+    );
+
+    // Só atualiza comparáveis que de fato pertencem a essa avaliação —
+    // evita que um id forjado no corpo da requisição altere o registro
+    // de outro corretor.
+    const atualizarFonte = db.prepare(
+      `UPDATE comparaveis SET url_fonte = ? WHERE id = ? AND avaliacao_id = ?`
+    );
+    for (const { id, urlFonte } of comparaveisFontes) {
+      atualizarFonte.run(urlFonte, id, avaliacao.id);
+    }
+  });
+  salvar();
 
   res.json({ ok: true });
 });
@@ -649,6 +680,16 @@ app.delete('/api/admin/lead/:id', exigirLogin, exigirAdmin, (req, res) => {
 
 function publicoUsuario(u) {
   return { id: u.id, nome: u.nome, email: u.email, tipo: u.tipo, creci: u.creci, cnai: u.cnai };
+}
+
+function urlValida(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 /**

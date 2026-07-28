@@ -14,6 +14,15 @@ import UploadAnexos from '../components/UploadAnexos.jsx';
 const ESTADOS_CONSERVACAO = ['Novo', 'Seminovo', 'Usado', 'Ocupado'];
 const GRAUS = ['Grau I', 'Grau II', 'Grau III'];
 
+function urlPareceValida(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function diagnosticoPadrao(bairro) {
   return bairro
     ? `O imóvel avaliando está localizado no bairro ${bairro}, em Goiânia/GO. A região apresenta ` +
@@ -36,6 +45,7 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
   const [gerandoLaudo, setGerandoLaudo] = useState(false);
   const [erroLaudo, setErroLaudo] = useState('');
   const [anexos, setAnexos] = useState([]);
+  const [urlsFonte, setUrlsFonte] = useState({});
   const [laudo, setLaudo] = useState({
     solicitanteNome: '', solicitanteCpf: '', finalidade: '', objetivo: '',
     matricula: '', inscricaoCadastral: '', fracaoIdeal: '', vagaGaragem: '',
@@ -103,6 +113,7 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
     setCarregando(true);
     setResultado(null);
     setAnexos([]);
+    setUrlsFonte({});
     try {
       const r = await api.avaliar({
         imovel: {
@@ -125,9 +136,21 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
       setErroLaudo('Informe ao menos o solicitante e a data da vistoria.');
       return;
     }
+
+    const comparaveisUsados = resultado.memoriaCalculo.comparaveisUsados;
+    const comparaveisFontes = comparaveisUsados.map((c) => ({
+      id: c.id, urlFonte: (urlsFonte[c.id] || '').trim(),
+    }));
+    if (comparaveisFontes.some((c) => !urlPareceValida(c.urlFonte))) {
+      setErroLaudo(
+        'Informe uma URL válida (http:// ou https://) para cada comparável usado, na tabela acima — é o que dá rastreabilidade ao laudo.'
+      );
+      return;
+    }
+
     setGerandoLaudo(true);
     try {
-      await api.salvarLaudo(resultado.avaliacaoId, laudo);
+      await api.salvarLaudo(resultado.avaliacaoId, { ...laudo, comparaveisFontes });
       await gerarPTAM({
         fotos: anexos.filter((a) => a.tipo === 'foto'),
         avaliador: { nome: usuario.nome, creci: usuario.creci, cnai: usuario.cnai, email: usuario.email },
@@ -152,7 +175,15 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
           padraoLabel: PADROES.find((p) => p.id === imovel.padrao)?.label,
         },
         diagnosticoMercado: laudo.diagnosticoMercado,
-        resultado,
+        resultado: {
+          ...resultado,
+          memoriaCalculo: {
+            ...resultado.memoriaCalculo,
+            comparaveisUsados: comparaveisUsados.map((c) => ({
+              ...c, urlFonte: urlsFonte[c.id],
+            })),
+          },
+        },
         grauFundamentacao: laudo.grauFundamentacao,
         grauPrecisao: laudo.grauPrecisao,
         dataVistoria: laudo.dataVistoria,
@@ -295,26 +326,46 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
                 </p>
               </div>
 
-              <h3 style={{ marginBottom: 'var(--e-3)', fontSize: 'var(--t-base)' }}>
+              <h3 style={{ marginBottom: 'var(--e-2)', fontSize: 'var(--t-base)' }}>
                 Comparáveis utilizados ({resultado.memoriaCalculo.qtdSelecionados})
               </h3>
+              <p style={{ fontSize: 'var(--t-xs)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-3)' }}>
+                A busca acima é simulada — endereço e valor de cada comparável são gerados pelo
+                sistema, não vêm de um anúncio real ainda. Antes de gerar o laudo, cole abaixo o
+                link de um anúncio real que você conferiu e considera equivalente a cada comparável.
+                O sistema não confirma que os números batem com o link — essa checagem é sua.
+              </p>
               <table className="tabela" style={{ marginBottom: 'var(--e-6)' }}>
                 <thead>
                   <tr>
                     <th>Referência</th><th style={{ textAlign: 'right' }}>Área</th>
                     <th style={{ textAlign: 'right' }}>Anúncio</th><th style={{ textAlign: 'right' }}>R$/m²</th>
                     <th style={{ textAlign: 'right' }}>Dist.</th><th style={{ textAlign: 'right' }}>Simil.</th>
+                    <th>URL do anúncio real</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {resultado.memoriaCalculo.comparaveisUsados.map((c, i) => (
-                    <tr key={i}>
+                  {resultado.memoriaCalculo.comparaveisUsados.map((c) => (
+                    <tr key={c.id}>
                       <td>{c.endereco}</td>
                       <td className="num">{c.area} m²</td>
                       <td className="num">{formatarBRL(c.valorAnuncio)}</td>
                       <td className="num">{formatarBRL(c.valorM2)}</td>
                       <td className="num">{c.distanciaKm} km</td>
                       <td className="num">{(c.similaridade * 100).toFixed(0)}%</td>
+                      <td>
+                        <input
+                          type="url"
+                          placeholder="https://..."
+                          value={urlsFonte[c.id] || ''}
+                          onChange={(e) => setUrlsFonte((u) => ({ ...u, [c.id]: e.target.value }))}
+                          style={{
+                            width: '100%', fontSize: 'var(--t-xs)', padding: 'var(--e-1) var(--e-2)',
+                            border: '1px solid var(--linha)', borderRadius: 'var(--raio)',
+                            background: 'var(--papel-fundo)', color: 'var(--tinta)',
+                          }}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>

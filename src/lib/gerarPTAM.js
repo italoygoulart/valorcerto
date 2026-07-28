@@ -149,7 +149,16 @@ export async function gerarPTAM(dados) {
           { text: 'Preço ofertado (R$)', style: 'thCell' }, { text: 'R$/m²', style: 'thCell' },
         ],
         ...comparaveis.map((c, i) => [
-          String(i + 1), c.endereco, String(c.area), String(imovel.vagas ?? 1),
+          String(i + 1),
+          {
+            stack: [
+              { text: c.endereco },
+              c.urlFonte
+                ? { text: c.urlFonte, link: c.urlFonte, fontSize: 7, color: '#1a5fb4', margin: [0, 2, 0, 0] }
+                : { text: 'Sem fonte informada', fontSize: 7, color: '#c00', italics: true, margin: [0, 2, 0, 0] },
+            ],
+          },
+          String(c.area), String(imovel.vagas ?? 1),
           formatarBRL(c.valorAnuncio), formatarBRL(c.valorM2),
         ]),
       ],
