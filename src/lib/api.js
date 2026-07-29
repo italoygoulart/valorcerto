@@ -1,6 +1,6 @@
 /** Cliente da API. Guarda o token em memória + sessionStorage. */
 
-const BASE = '/api';
+const BASE = (import.meta.env.VITE_API_URL || '') + '/api';
 
 export function getToken() {
   try { return sessionStorage.getItem('token'); } catch { return null; }
@@ -44,15 +44,21 @@ async function enviarArquivos(caminho, arquivos) {
 export const api = {
   estimativa: (corpo) => req('/estimativa', { method: 'POST', body: JSON.stringify(corpo) }),
   anexarEstimativa: (id, arquivos) => enviarArquivos(`/estimativa/${id}/anexos`, arquivos),
+  comprarLaudoProprietario: (id) => req(`/estimativa/${id}/laudo/comprar`, { method: 'POST' }),
   login: (corpo) => req('/auth/login', { method: 'POST', body: JSON.stringify(corpo) }),
   cadastro: (corpo) => req('/auth/cadastro', { method: 'POST', body: JSON.stringify(corpo) }),
   eu: () => req('/auth/eu'),
   assinar: (plano) => req('/assinatura/criar', { method: 'POST', body: JSON.stringify({ plano }) }),
+  comprarCreditoLaudo: () => req('/creditos/comprar', { method: 'POST' }),
   avaliar: (corpo) => req('/corretor/avaliar', { method: 'POST', body: JSON.stringify(corpo) }),
   historico: () => req('/corretor/historico'),
   avaliacao: (id) => req(`/corretor/avaliacao/${id}`),
   salvarLaudo: (id, corpo) => req(`/corretor/avaliacao/${id}/laudo`, { method: 'PUT', body: JSON.stringify(corpo) }),
   anexarAvaliacao: (id, arquivos) => enviarArquivos(`/corretor/avaliacao/${id}/anexos`, arquivos),
+  pedidosLaudo: () => req('/corretor/pedidos-laudo'),
+  assumirPedidoLaudo: (id) => req(`/corretor/pedidos-laudo/${id}/assumir`, { method: 'POST' }),
+  concluirPedidoLaudo: (id, avaliacaoId) =>
+    req(`/corretor/pedidos-laudo/${id}/concluir`, { method: 'PUT', body: JSON.stringify({ avaliacaoId }) }),
   leads: () => req('/admin/leads'),
   metricas: () => req('/admin/metricas'),
   indice: () => req('/admin/indice'),

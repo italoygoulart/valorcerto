@@ -32,7 +32,8 @@ function diagnosticoPadrao(bairro) {
     : '';
 }
 
-export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) {
+export default function PainelCorretor({ usuario, assinaturaAtiva, creditosDisponiveis, aoAssinar }) {
+  const acessoLiberado = assinaturaAtiva || creditosDisponiveis > 0;
   const [aba, setAba] = useState('avaliar');
   const [imovel, setImovel] = useState({
     tipo: 'apartamento', bairro: '', area: '', areaTotal: '', vagas: '0',
@@ -52,28 +53,66 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
     andar: '', dormitorios: '', estadoConservacao: 'Novo', dataVistoria: '',
     diagnosticoMercado: '', grauFundamentacao: 'Grau II', grauPrecisao: 'Grau III',
   });
+  const [pedidos, setPedidos] = useState([]);
+  const [pedidoEmAndamento, setPedidoEmAndamento] = useState(null);
 
   useEffect(() => {
-    if (aba === 'historico' && assinaturaAtiva) {
+    if (aba === 'historico' && acessoLiberado) {
       api.historico().then(setHistorico).catch(() => {});
     }
-  }, [aba, assinaturaAtiva]);
+    if (aba === 'pedidos' && acessoLiberado) {
+      api.pedidosLaudo().then(setPedidos).catch(() => {});
+    }
+  }, [aba, acessoLiberado]);
 
-  /* ── Gate de assinatura ────────────────────────────── */
-  if (!assinaturaAtiva) {
+  async function assumirPedido(pedido) {
+    try {
+      const r = await api.assumirPedidoLaudo(pedido.id);
+      iniciarAvaliacaoDoPedido(pedido.id, r.imovel);
+    } catch (e) {
+      setErro(e.message);
+    }
+  }
+
+  function continuarPedido(pedido) {
+    iniciarAvaliacaoDoPedido(pedido.id, {
+      tipo: pedido.imovel_tipo, bairro: pedido.bairro, area: pedido.area,
+      areaTotal: pedido.area_total, vagas: pedido.vagas, padrao: pedido.padrao, idade: pedido.idade,
+    });
+  }
+
+  function iniciarAvaliacaoDoPedido(pedidoId, dadosImovel) {
+    setPedidoEmAndamento(pedidoId);
+    setImovel({
+      tipo: dadosImovel.tipo || 'apartamento',
+      bairro: dadosImovel.bairro || '',
+      area: String(dadosImovel.area || ''),
+      areaTotal: String(dadosImovel.areaTotal || ''),
+      vagas: String(dadosImovel.vagas ?? '0'),
+      padrao: dadosImovel.padrao || 'medio',
+      idade: dadosImovel.idade || 'seminovo',
+      endereco: dadosImovel.endereco || '',
+    });
+    setResultado(null);
+    setAba('avaliar');
+  }
+
+  /* ── Gate de acesso pago ───────────────────────────── */
+  if (!acessoLiberado) {
     return (
       <div className="container-estreito" style={{ padding: 'var(--e-12) var(--e-6)' }}>
-        <h1 style={{ marginBottom: 'var(--e-3)' }}>Ative sua assinatura</h1>
+        <h1 style={{ marginBottom: 'var(--e-3)' }}>Ative seu acesso</h1>
         <p style={{ color: 'var(--tinta-suave)', marginBottom: 'var(--e-8)' }}>
-          A avaliação por comparação de mercado está disponível para assinantes.
+          A avaliação por comparação de mercado está disponível para assinantes ou
+          por compra avulsa de laudo.
         </p>
 
-        <div className="grid-2">
+        <div className="grid-3">
           <div className="cartao">
             <h3>Mensal</h3>
             <div className="numero" style={{ fontSize: 'var(--t-xl)', margin: 'var(--e-3) 0' }}>R$ 89<span style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)' }}>/mês</span></div>
             <p style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-4)' }}>
-              Avaliações ilimitadas. Cancele quando quiser.
+              Avaliações e laudos ilimitados. Cancele quando quiser.
             </p>
             <button className="btn" style={{ width: '100%' }}
               onClick={() => api.assinar('mensal').then(aoAssinar)}>
@@ -92,12 +131,24 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
               Assinar anual
             </button>
           </div>
+
+          <div className="cartao">
+            <h3>Avulso</h3>
+            <div className="numero" style={{ fontSize: 'var(--t-xl)', margin: 'var(--e-3) 0' }}>R$ 269<span style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)' }}>,90/laudo</span></div>
+            <p style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-4)' }}>
+              Sem assinatura. Paga só quando emitir um laudo PTAM.
+            </p>
+            <button className="btn btn-secundario" style={{ width: '100%' }}
+              onClick={() => api.comprarCreditoLaudo().then(aoAssinar)}>
+              Comprar 1 laudo
+            </button>
+          </div>
         </div>
 
         <div className="aviso" style={{ marginTop: 'var(--e-8)' }}>
-          <strong>Ambiente de teste:</strong> a assinatura é ativada sem cobrança real.
-          A integração com gateway de pagamento (com Pix) está pendente — ver item 5
-          do briefing técnico.
+          <strong>Ambiente de teste:</strong> a assinatura e a compra avulsa são ativadas
+          sem cobrança real. A integração com gateway de pagamento (com Pix) está
+          pendente — ver item 5 do briefing técnico.
         </div>
       </div>
     );
@@ -141,9 +192,10 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
     const comparaveisFontes = comparaveisUsados.map((c) => ({
       id: c.id, urlFonte: (urlsFonte[c.id] || '').trim(),
     }));
-    if (comparaveisFontes.some((c) => !urlPareceValida(c.urlFonte))) {
+    // URL da fonte é opcional — quando preenchida, ainda precisa ser um link válido.
+    if (comparaveisFontes.some((c) => c.urlFonte && !urlPareceValida(c.urlFonte))) {
       setErroLaudo(
-        'Informe uma URL válida (http:// ou https://) para cada comparável usado, na tabela acima — é o que dá rastreabilidade ao laudo.'
+        'A URL informada para um dos comparáveis não é um link válido (http:// ou https://). Corrija ou deixe o campo em branco.'
       );
       return;
     }
@@ -188,6 +240,11 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
         grauPrecisao: laudo.grauPrecisao,
         dataVistoria: laudo.dataVistoria,
       });
+
+      if (pedidoEmAndamento) {
+        await api.concluirPedidoLaudo(pedidoEmAndamento, resultado.avaliacaoId);
+        setPedidoEmAndamento(null);
+      }
     } catch (e) {
       setErroLaudo(e.message);
     } finally {
@@ -197,8 +254,22 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
 
   return (
     <div className="container" style={{ padding: 'var(--e-8) var(--e-6)' }}>
+      {!assinaturaAtiva && (
+        <div className="aviso" style={{ marginBottom: 'var(--e-6)' }}>
+          Você não tem assinatura ativa. Créditos de laudo avulso disponíveis:{' '}
+          <strong>{creditosDisponiveis}</strong>. Cada crédito é consumido ao emitir o
+          laudo PTAM (a busca de comparáveis não gasta crédito).{' '}
+          <button
+            className="btn btn-secundario btn-pequeno"
+            style={{ marginLeft: 'var(--e-2)' }}
+            onClick={() => api.comprarCreditoLaudo().then(aoAssinar)}
+          >
+            Comprar mais 1 laudo
+          </button>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 'var(--e-6)', borderBottom: '1px solid var(--linha)', marginBottom: 'var(--e-8)' }}>
-        {[['avaliar', 'Nova avaliação'], ['historico', 'Histórico']].map(([id, label]) => (
+        {[['avaliar', 'Nova avaliação'], ['pedidos', 'Pedidos de laudo'], ['historico', 'Histórico']].map(([id, label]) => (
           <button key={id} onClick={() => setAba(id)}
             style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: 'var(--e-3) 0',
@@ -236,10 +307,60 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
             </table>
           )}
         </>
+      ) : aba === 'pedidos' ? (
+        <>
+          <h2 style={{ marginBottom: 'var(--e-2)' }}>Laudos comprados por proprietários</h2>
+          <p style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-6)' }}>
+            Pedidos pagos diretamente pelo proprietário na página de estimativa gratuita.
+            Assuma um pedido para pré-preencher a avaliação com os dados do imóvel dele.
+          </p>
+          {pedidos.length === 0 ? (
+            <p style={{ color: 'var(--tinta-suave)' }}>Nenhum pedido pendente no momento.</p>
+          ) : (
+            <table className="tabela">
+              <thead>
+                <tr>
+                  <th>Solicitado em</th><th>Proprietário</th><th>Contato</th>
+                  <th>Imóvel</th><th style={{ textAlign: 'right' }}>Área</th>
+                  <th>Status</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {pedidos.map((p) => (
+                  <tr key={p.id}>
+                    <td className="num">{p.criado_em?.slice(0, 10)}</td>
+                    <td>{p.proprietario_nome}</td>
+                    <td>{p.proprietario_email}{p.proprietario_telefone ? ` · ${p.proprietario_telefone}` : ''}</td>
+                    <td>{p.imovel_tipo} — {p.bairro}</td>
+                    <td className="num">{p.area} m²</td>
+                    <td>{p.status === 'pago' ? 'Aguardando corretor' : 'Em andamento (você)'}</td>
+                    <td>
+                      {p.status === 'pago' ? (
+                        <button className="btn btn-secundario btn-pequeno" onClick={() => assumirPedido(p)}>
+                          Assumir
+                        </button>
+                      ) : (
+                        <button className="btn btn-secundario btn-pequeno" onClick={() => continuarPedido(p)}>
+                          Continuar
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: resultado ? '380px 1fr' : '1fr', gap: 'var(--e-8)', alignItems: 'start' }}>
           <div className="cartao">
             <h2 style={{ marginBottom: 'var(--e-6)', fontSize: 'var(--t-lg)' }}>Dados do imóvel</h2>
+            {pedidoEmAndamento && (
+              <div className="aviso" style={{ marginBottom: 'var(--e-4)' }}>
+                Avaliação de um pedido de laudo pago pelo proprietário. Ao concluir e gerar o
+                PTAM, o pedido será marcado como atendido.
+              </div>
+            )}
             <form onSubmit={avaliar}>
               <div className="campo">
                 <label htmlFor="c-tipo">Tipo</label>
@@ -331,9 +452,10 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
               </h3>
               <p style={{ fontSize: 'var(--t-xs)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-3)' }}>
                 A busca acima é simulada — endereço e valor de cada comparável são gerados pelo
-                sistema, não vêm de um anúncio real ainda. Antes de gerar o laudo, cole abaixo o
-                link de um anúncio real que você conferiu e considera equivalente a cada comparável.
-                O sistema não confirma que os números batem com o link — essa checagem é sua.
+                sistema, não vêm de um anúncio real ainda. Se quiser, cole abaixo o link de um
+                anúncio real que você conferiu e considera equivalente a cada comparável (opcional,
+                mas reforça a rastreabilidade do laudo). O sistema não confirma que os números batem
+                com o link — essa checagem é sua.
               </p>
               <table className="tabela" style={{ marginBottom: 'var(--e-6)' }}>
                 <thead>
@@ -341,7 +463,7 @@ export default function PainelCorretor({ usuario, assinaturaAtiva, aoAssinar }) 
                     <th>Referência</th><th style={{ textAlign: 'right' }}>Área</th>
                     <th style={{ textAlign: 'right' }}>Anúncio</th><th style={{ textAlign: 'right' }}>R$/m²</th>
                     <th style={{ textAlign: 'right' }}>Dist.</th><th style={{ textAlign: 'right' }}>Simil.</th>
-                    <th>URL do anúncio real</th>
+                    <th>URL do anúncio real (opcional)</th>
                   </tr>
                 </thead>
                 <tbody>

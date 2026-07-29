@@ -111,6 +111,42 @@ export function initDb() {
       proxima_cobranca TEXT
     );
 
+    -- Pedidos de laudo PTAM comprados diretamente pelo proprietário (cliente
+    -- final), a partir da estimativa gratuita. O pagamento é do proprietário,
+    -- não do corretor — quem cumpre o pedido é um corretor da equipe, que
+    -- assume, revisa/coleta os comparáveis e assina o laudo (NBR exige um
+    -- responsável técnico com CRECI, então não dá pra ser 100% self-service).
+    CREATE TABLE IF NOT EXISTS pedidos_laudo (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      avaliacao_gratuita_id INTEGER NOT NULL REFERENCES avaliacoes(id) ON DELETE CASCADE,
+      avaliacao_paga_id   INTEGER REFERENCES avaliacoes(id) ON DELETE SET NULL,
+      status              TEXT NOT NULL CHECK (status IN ('pago','em_analise','concluido')) DEFAULT 'pago',
+      valor_centavos      INTEGER NOT NULL,
+      gateway             TEXT,
+      gateway_id          TEXT,
+      corretor_id         INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+      criado_em           TEXT NOT NULL DEFAULT (datetime('now')),
+      atribuido_em        TEXT,
+      concluido_em        TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pedidos_laudo_status ON pedidos_laudo(status);
+
+    -- Créditos de laudo avulso (pagamento por uso, alternativa à assinatura)
+    CREATE TABLE IF NOT EXISTS creditos_laudo (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      usuario_id      INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      status          TEXT NOT NULL CHECK (status IN ('disponivel','usado')) DEFAULT 'disponivel',
+      valor_centavos  INTEGER NOT NULL,
+      gateway         TEXT,
+      gateway_id      TEXT,
+      avaliacao_id    INTEGER REFERENCES avaliacoes(id) ON DELETE SET NULL,
+      criado_em       TEXT NOT NULL DEFAULT (datetime('now')),
+      usado_em        TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_creditos_usuario ON creditos_laudo(usuario_id, status);
+
     -- Histórico do índice FipeZAP (atualização manual mensal)
     CREATE TABLE IF NOT EXISTS indices_fipezap (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,

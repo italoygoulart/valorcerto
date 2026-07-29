@@ -24,6 +24,9 @@ export default function Estimativa() {
   const [erro, setErro] = useState('');
   const [carregando, setCarregando] = useState(false);
   const [anexos, setAnexos] = useState([]);
+  const [pedidoLaudo, setPedidoLaudo] = useState(null);
+  const [comprandoLaudo, setComprandoLaudo] = useState(false);
+  const [erroLaudo, setErroLaudo] = useState('');
 
   const ehTerreno = imovel.tipo === 'terreno';
   const ehCasa = imovel.tipo === 'casa';
@@ -77,7 +80,22 @@ export default function Estimativa() {
     setAceite(false);
     setResultado(null);
     setAnexos([]);
+    setPedidoLaudo(null);
+    setErroLaudo('');
     setEtapa('imovel');
+  }
+
+  async function comprarLaudo() {
+    setErroLaudo('');
+    setComprandoLaudo(true);
+    try {
+      const r = await api.comprarLaudoProprietario(resultado.avaliacaoId);
+      setPedidoLaudo(r);
+    } catch (e) {
+      setErroLaudo(e.message);
+    } finally {
+      setComprandoLaudo(false);
+    }
   }
 
   /* ── Resultado ─────────────────────────────────────── */
@@ -107,30 +125,6 @@ export default function Estimativa() {
           <div className="aviso" style={{ marginTop: 'var(--e-4)' }}>{AVISO_FALLBACK}</div>
         )}
 
-        {/* Memória de cálculo — transparência */}
-        <details style={{ marginTop: 'var(--e-6)' }}>
-          <summary style={{ cursor: 'pointer', fontSize: 'var(--t-sm)', fontWeight: 500 }}>
-            Como chegamos a esse valor
-          </summary>
-          <table className="tabela" style={{ marginTop: 'var(--e-4)' }}>
-            <tbody>
-              <tr><td>Região de referência</td><td className="num">{resultado.memoriaCalculo.regiao}</td></tr>
-              <tr><td>Valor base do m²</td><td className="num">{formatarBRL(resultado.memoriaCalculo.valorM2Base)}</td></tr>
-              <tr><td>Área considerada</td><td className="num">{resultado.memoriaCalculo.area} m²</td></tr>
-              <tr><td>Ajuste por padrão</td><td className="num">×{resultado.memoriaCalculo.fatorPadrao}</td></tr>
-              <tr><td>Ajuste por idade</td><td className="num">×{resultado.memoriaCalculo.fatorIdade}</td></tr>
-              <tr><td>Vagas de garagem</td><td className="num">{resultado.memoriaCalculo.vagas}</td></tr>
-              {resultado.memoriaCalculo.areaTerrenoExcedente > 0 && (
-                <>
-                  <tr><td>Terreno excedente à construção</td><td className="num">{resultado.memoriaCalculo.areaTerrenoExcedente.toFixed(0)} m²</td></tr>
-                  <tr><td>Valor do m² de terreno</td><td className="num">{formatarBRL(resultado.memoriaCalculo.valorM2Terreno)}</td></tr>
-                  <tr><td>Acréscimo pelo terreno</td><td className="num">{formatarBRL(resultado.memoriaCalculo.valorTerrenoExcedente)}</td></tr>
-                </>
-              )}
-            </tbody>
-          </table>
-        </details>
-
         {/* Fotos do imóvel — ajuda o corretor a avaliar o contato */}
         <div className="cartao" style={{ marginTop: 'var(--e-6)' }}>
           <h3 style={{ marginBottom: 'var(--e-2)', fontSize: 'var(--t-base)' }}>
@@ -147,27 +141,32 @@ export default function Estimativa() {
           />
         </div>
 
-        {/* Upsell do laudo */}
+        {/* Upsell do laudo profissional (PTAM) */}
         <div className="cartao" style={{ marginTop: 'var(--e-8)', borderLeft: '3px solid var(--selo)' }}>
-          <h3 style={{ marginBottom: 'var(--e-3)' }}>Precisa de um valor com precisão?</h3>
+          <h3 style={{ marginBottom: 'var(--e-3)' }}>Precisa de um valor com validade técnica?</h3>
           <p style={{ fontSize: 'var(--t-sm)', color: 'var(--tinta-suave)', marginBottom: 'var(--e-4)' }}>
-            A estimativa acima usa índices de mercado. Uma avaliação precisa considera
-            o estado real do imóvel, a rua, a vista, o andar e comparáveis efetivamente
-            negociados na região — feita presencialmente por perito credenciado.
+            A estimativa acima usa índices de mercado. O Parecer Técnico de Avaliação
+            Mercadológica (PTAM) é elaborado por um corretor avaliador credenciado (CRECI),
+            com vistoria, comparáveis reais da região e conformidade com a NBR 14.653 —
+            documento que pode instruir processos, financiamentos ou negociações.
           </p>
-          <table className="tabela" style={{ marginBottom: 'var(--e-4)' }}>
-            <tbody>
-              <tr><td>Avaliação precisa — imóvel padrão</td><td className="num">R$ 397</td></tr>
-              <tr><td>Avaliação precisa — alto padrão</td><td className="num">R$ 497</td></tr>
-            </tbody>
-          </table>
-          <a href="https://wa.me/5562000000000" className="btn" style={{ display: 'inline-block' }}>
-            Solicitar avaliação precisa
-          </a>
-          <p style={{ fontSize: 'var(--t-xs)', color: 'var(--tinta-suave)', marginTop: 'var(--e-3)' }}>
-            {/* TODO: trocar pelo número real de WhatsApp do corretor */}
-            Você receberá o contato do perito para agendar a visita.
-          </p>
+
+          {pedidoLaudo ? (
+            <div className="aviso">{pedidoLaudo.aviso}</div>
+          ) : (
+            <>
+              <div className="numero" style={{ fontSize: 'var(--t-xl)', fontWeight: 500, marginBottom: 'var(--e-3)' }}>
+                R$ 299,90
+              </div>
+              {erroLaudo && <div className="aviso aviso-erro" style={{ marginBottom: 'var(--e-4)' }}>{erroLaudo}</div>}
+              <button className="btn" disabled={comprandoLaudo} onClick={comprarLaudo}>
+                {comprandoLaudo ? 'Processando…' : 'Solicitar laudo PTAM'}
+              </button>
+              <p style={{ fontSize: 'var(--t-xs)', color: 'var(--tinta-suave)', marginTop: 'var(--e-3)' }}>
+                Um corretor da equipe entra em contato para agendar a vistoria e emitir o laudo.
+              </p>
+            </>
+          )}
         </div>
 
         <div className="legal" style={{ marginTop: 'var(--e-6)' }}>{DISCLAIMER_ESTIMATIVA}</div>

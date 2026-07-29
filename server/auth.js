@@ -55,28 +55,46 @@ export function exigirLogin(req, res, next) {
 }
 
 /**
- * Middleware: exige assinatura ativa.
- * Este é o gate comercial da aba de corretores.
+ * Consulta o acesso pago do usuário: assinatura ativa e/ou créditos de
+ * laudo avulso ainda não usados. Os dois modelos convivem — quem assina
+ * tem uso ilimitado; quem não assina pode comprar créditos por laudo.
  */
-export function exigirAssinaturaAtiva(req, res, next) {
-  if (req.usuario.tipo === 'admin') return next(); // admin sempre passa
-
+export function obterAcesso(usuarioId) {
   const assinatura = db
     .prepare(
       `SELECT * FROM assinaturas
        WHERE usuario_id = ? AND status = 'ativa'
        ORDER BY id DESC LIMIT 1`
     )
-    .get(req.usuario.id);
+    .get(usuarioId);
 
-  if (!assinatura) {
+  const creditosDisponiveis = db
+    .prepare(`SELECT COUNT(*) n FROM creditos_laudo WHERE usuario_id = ? AND status = 'disponivel'`)
+    .get(usuarioId).n;
+
+  return { assinatura: assinatura || null, creditosDisponiveis };
+}
+
+/**
+ * Middleware: exige acesso pago à área do corretor — assinatura ativa OU
+ * ao menos um crédito de laudo avulso disponível. Este é o gate comercial
+ * da aba de corretores. O crédito em si só é consumido na emissão do laudo
+ * (rota .../laudo), não aqui — entrar na área e buscar comparáveis não gasta
+ * o crédito.
+ */
+export function exigirAcesso(req, res, next) {
+  if (req.usuario.tipo === 'admin') return next(); // admin sempre passa
+
+  const acesso = obterAcesso(req.usuario.id);
+  if (!acesso.assinatura && acesso.creditosDisponiveis === 0) {
     return res.status(403).json({
-      erro: 'Sua assinatura não está ativa.',
+      erro: 'Sua assinatura não está ativa e você não tem créditos de laudo avulso disponíveis.',
       acao: 'assinar',
     });
   }
 
-  req.assinatura = assinatura;
+  req.assinatura = acesso.assinatura;
+  req.creditosDisponiveis = acesso.creditosDisponiveis;
   next();
 }
 

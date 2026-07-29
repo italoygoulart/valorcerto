@@ -21,7 +21,7 @@ import {
 } from './storage.js';
 import {
   hashSenha, verificarSenha, gerarToken,
-  exigirLogin, exigirAssinaturaAtiva, exigirAdmin, validarFormatoCreci,
+  exigirLogin, exigirAcesso, exigirAdmin, validarFormatoCreci, obterAcesso,
 } from './auth.js';
 import { calcularEstimativa } from '../src/lib/motorFipeZap.js';
 import { avaliarPorComparaveis } from '../src/lib/motorComparaveis.js';
@@ -30,6 +30,9 @@ import { VALOR_M2, REGIOES, TIPOS_IMOVEL } from '../src/data/indiceFipeZap.js';
 
 const REGIOES_VALIDAS = new Set(Object.values(REGIOES));
 const TIPOS_VALIDOS = new Set(TIPOS_IMOVEL.map((t) => t.id));
+
+/** Lançada dentro de transações para virar 402 (pagamento necessário) sem confundir com erro de validação. */
+class ErroAcessoNegado extends Error {}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -53,7 +56,10 @@ const PORT =
   (process.env.NODE_ENV === 'production' ? process.env.PORT : null) ||
   3001;
 
-app.use(cors());
+const origensPermitidas = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
+  : ['http://localhost:5173'];
+app.use(cors({ origin: origensPermitidas, credentials: true }));
 app.use(express.json());
 
 // Rate limiting das rotas públicas sensíveis: login (brute-force de senha),
@@ -79,6 +85,13 @@ const limitadorAnexos = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { erro: 'Limite de envio de arquivos atingido. Tente novamente mais tarde.' },
+});
+const limitadorPedidoLaudo = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Limite de solicitações atingido. Tente novamente mais tarde.' },
 });
 
 // Upload em memória (não grava em disco local) — o buffer vai direto pro R2.
@@ -248,6 +261,50 @@ app.post(
   }
 );
 
+/**
+ * POST /api/estimativa/:id/laudo/comprar
+ *
+ * Compra do laudo PTAM diretamente pelo proprietário, a partir da
+ * estimativa gratuita que ele já recebeu. Preço fixo, único (não varia por
+ * padrão do imóvel).
+ *
+ * ─────────────────────────────────────────────────────────────────
+ * ATENÇÃO DESENVOLVEDOR — INTEGRAÇÃO DE PAGAMENTO PENDENTE
+ *
+ * Mesmo padrão de stub das rotas de assinatura/crédito: registra o pedido
+ * como 'pago' sem cobrar de verdade. Em produção, só criar a linha após
+ * confirmação do gateway via webhook.
+ * ─────────────────────────────────────────────────────────────────
+ */
+const VALOR_LAUDO_PROPRIETARIO_CENTAVOS = 29990;
+
+app.post('/api/estimativa/:id/laudo/comprar', limitadorPedidoLaudo, (req, res) => {
+  const avaliacao = db
+    .prepare(`SELECT id FROM avaliacoes WHERE id = ? AND tipo = 'gratuita'`)
+    .get(req.params.id);
+  if (!avaliacao) return res.status(404).json({ erro: 'Avaliação não encontrada.' });
+
+  const jaTemPedido = db
+    .prepare(`SELECT id FROM pedidos_laudo WHERE avaliacao_gratuita_id = ?`)
+    .get(avaliacao.id);
+  if (jaTemPedido) {
+    return res.status(400).json({ erro: 'Já existe um pedido de laudo para esta avaliação.' });
+  }
+
+  const r = db
+    .prepare(
+      `INSERT INTO pedidos_laudo (avaliacao_gratuita_id, status, valor_centavos, gateway)
+       VALUES (?, 'pago', ?, 'STUB-SEM-COBRANCA')`
+    )
+    .run(avaliacao.id, VALOR_LAUDO_PROPRIETARIO_CENTAVOS);
+
+  res.json({
+    ok: true,
+    pedidoId: r.lastInsertRowid,
+    aviso: 'Pedido registrado sem cobrança real (ambiente de teste). Um corretor da equipe vai entrar em contato para agendar a vistoria.',
+  });
+});
+
 /* ══════════════════════════════════════════════════════════════════
    AUTENTICAÇÃO
    ══════════════════════════════════════════════════════════════════ */
@@ -295,26 +352,24 @@ app.post('/api/auth/login', limitadorLogin, (req, res) => {
     return res.status(401).json({ erro: 'E-mail ou senha incorretos.' });
   }
 
-  const assinatura = db
-    .prepare(`SELECT * FROM assinaturas WHERE usuario_id = ? AND status='ativa' ORDER BY id DESC LIMIT 1`)
-    .get(usuario.id);
+  const acesso = obterAcesso(usuario.id);
 
   res.json({
     token: gerarToken(usuario),
     usuario: publicoUsuario(usuario),
-    assinaturaAtiva: !!assinatura || usuario.tipo === 'admin',
+    assinaturaAtiva: !!acesso.assinatura || usuario.tipo === 'admin',
+    creditosDisponiveis: acesso.creditosDisponiveis,
   });
 });
 
 app.get('/api/auth/eu', exigirLogin, (req, res) => {
   const usuario = db.prepare('SELECT * FROM usuarios WHERE id = ?').get(req.usuario.id);
-  const assinatura = db
-    .prepare(`SELECT * FROM assinaturas WHERE usuario_id = ? AND status='ativa' ORDER BY id DESC LIMIT 1`)
-    .get(usuario.id);
+  const acesso = obterAcesso(usuario.id);
   res.json({
     usuario: publicoUsuario(usuario),
-    assinaturaAtiva: !!assinatura || usuario.tipo === 'admin',
-    assinatura: assinatura || null,
+    assinaturaAtiva: !!acesso.assinatura || usuario.tipo === 'admin',
+    assinatura: acesso.assinatura,
+    creditosDisponiveis: acesso.creditosDisponiveis,
   });
 });
 
@@ -322,7 +377,7 @@ app.get('/api/auth/eu', exigirLogin, (req, res) => {
    ÁREA DO CORRETOR — exige login + assinatura ativa
    ══════════════════════════════════════════════════════════════════ */
 
-app.post('/api/corretor/avaliar', exigirLogin, exigirAssinaturaAtiva, async (req, res) => {
+app.post('/api/corretor/avaliar', exigirLogin, exigirAcesso, async (req, res) => {
   const { imovel, comparaveisManuais } = req.body;
 
   try {
@@ -396,7 +451,7 @@ app.post('/api/corretor/avaliar', exigirLogin, exigirAssinaturaAtiva, async (req
   }
 });
 
-app.get('/api/corretor/historico', exigirLogin, exigirAssinaturaAtiva, (req, res) => {
+app.get('/api/corretor/historico', exigirLogin, exigirAcesso, (req, res) => {
   const linhas = db
     .prepare(
       `SELECT a.id, a.tipo, a.valor_minimo, a.valor_maximo, a.valor_central, a.criado_em,
@@ -410,7 +465,94 @@ app.get('/api/corretor/historico', exigirLogin, exigirAssinaturaAtiva, (req, res
   res.json(linhas);
 });
 
-app.get('/api/corretor/avaliacao/:id', exigirLogin, exigirAssinaturaAtiva, (req, res) => {
+/**
+ * GET /api/corretor/pedidos-laudo
+ * Fila de laudos comprados por proprietários: pedidos ainda sem corretor
+ * ('pago') e os que este corretor já assumiu e não concluiu ('em_analise').
+ * O pagamento é do proprietário — não consome assinatura/crédito do
+ * corretor, só exige que ele tenha acesso à área (esteja ativo).
+ */
+app.get('/api/corretor/pedidos-laudo', exigirLogin, exigirAcesso, (req, res) => {
+  const pedidos = db
+    .prepare(
+      `SELECT p.id, p.status, p.valor_centavos, p.criado_em, p.atribuido_em,
+              u.nome AS proprietario_nome, u.email AS proprietario_email, u.telefone AS proprietario_telefone,
+              i.tipo AS imovel_tipo, i.bairro, i.area, i.area_total, i.quartos, i.vagas, i.padrao, i.idade
+       FROM pedidos_laudo p
+       JOIN avaliacoes a ON a.id = p.avaliacao_gratuita_id
+       JOIN imoveis i ON i.id = a.imovel_id
+       JOIN usuarios u ON u.id = a.usuario_id
+       WHERE p.status = 'pago' OR (p.status = 'em_analise' AND p.corretor_id = ?)
+       ORDER BY p.criado_em ASC`
+    )
+    .all(req.usuario.id);
+  res.json(pedidos);
+});
+
+/**
+ * POST /api/corretor/pedidos-laudo/:id/assumir
+ * Corretor assume o pedido (vira responsável) e recebe os dados do imóvel
+ * para pré-preencher o formulário de nova avaliação.
+ */
+app.post('/api/corretor/pedidos-laudo/:id/assumir', exigirLogin, exigirAcesso, (req, res) => {
+  const pedido = db
+    .prepare(
+      `SELECT p.*, i.tipo AS imovel_tipo, i.bairro, i.area, i.area_total, i.vagas, i.padrao, i.idade, i.endereco
+       FROM pedidos_laudo p
+       JOIN avaliacoes a ON a.id = p.avaliacao_gratuita_id
+       JOIN imoveis i ON i.id = a.imovel_id
+       WHERE p.id = ? AND p.status = 'pago'`
+    )
+    .get(req.params.id);
+  if (!pedido) return res.status(404).json({ erro: 'Pedido não encontrado ou já foi assumido.' });
+
+  db.prepare(
+    `UPDATE pedidos_laudo SET status = 'em_analise', corretor_id = ?, atribuido_em = datetime('now') WHERE id = ?`
+  ).run(req.usuario.id, pedido.id);
+
+  res.json({
+    ok: true,
+    imovel: {
+      tipo: pedido.imovel_tipo,
+      bairro: pedido.bairro,
+      area: pedido.area,
+      areaTotal: pedido.area_total,
+      vagas: pedido.vagas,
+      padrao: pedido.padrao,
+      idade: pedido.idade,
+      endereco: pedido.endereco,
+    },
+  });
+});
+
+/**
+ * PUT /api/corretor/pedidos-laudo/:id/concluir
+ * Vincula o pedido pago à avaliação por comparáveis que o corretor acabou
+ * de gerar (já com laudo preenchido), fechando o ciclo de atendimento.
+ */
+app.put('/api/corretor/pedidos-laudo/:id/concluir', exigirLogin, exigirAcesso, (req, res) => {
+  const { avaliacaoId } = req.body;
+
+  const pedido = db
+    .prepare(`SELECT id FROM pedidos_laudo WHERE id = ? AND status = 'em_analise' AND corretor_id = ?`)
+    .get(req.params.id, req.usuario.id);
+  if (!pedido) return res.status(404).json({ erro: 'Pedido não encontrado ou não está atribuído a você.' });
+
+  const avaliacao = db
+    .prepare(`SELECT id FROM avaliacoes WHERE id = ? AND usuario_id = ? AND tipo = 'comparaveis' AND solicitante_nome IS NOT NULL`)
+    .get(avaliacaoId, req.usuario.id);
+  if (!avaliacao) {
+    return res.status(400).json({ erro: 'Informe uma avaliação com laudo já preenchido por você.' });
+  }
+
+  db.prepare(
+    `UPDATE pedidos_laudo SET status = 'concluido', avaliacao_paga_id = ?, concluido_em = datetime('now') WHERE id = ?`
+  ).run(avaliacao.id, pedido.id);
+
+  res.json({ ok: true });
+});
+
+app.get('/api/corretor/avaliacao/:id', exigirLogin, exigirAcesso, (req, res) => {
   const avaliacao = db
     .prepare(
       `SELECT a.*, i.tipo AS imovel_tipo, i.bairro, i.area, i.endereco, i.padrao, i.idade, i.vagas,
@@ -443,7 +585,7 @@ app.get('/api/corretor/avaliacao/:id', exigirLogin, exigirAssinaturaAtiva, (req,
  * (PTAM, NBR 14653) que não fazem parte do cálculo rápido: identificação
  * do solicitante, dados registrais do imóvel e enquadramento técnico.
  */
-app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAssinaturaAtiva, (req, res) => {
+app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAcesso, (req, res) => {
   const avaliacao = db
     .prepare('SELECT a.id, a.imovel_id FROM avaliacoes a WHERE a.id = ? AND a.usuario_id = ?')
     .get(req.params.id, req.usuario.id);
@@ -456,22 +598,44 @@ app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAssinaturaAtiva,
     dormitorios, estadoConservacao, comparaveisFontes,
   } = req.body;
 
-  // A URL da fonte de cada comparável é obrigatória pra gerar o laudo —
-  // sem isso, o PTAM fica sem como o solicitante conferir de onde veio
-  // o dado. Validamos aqui de novo (o front já valida) porque a rota é
-  // o único ponto de gravação — não dá pra confiar só na tela.
-  if (!Array.isArray(comparaveisFontes) || comparaveisFontes.length === 0) {
-    return res.status(400).json({ erro: 'Informe a URL da fonte de cada comparável usado.' });
+  // A URL da fonte de cada comparável é opcional. Quando informada, ainda
+  // precisa ser um link válido — validamos aqui de novo (o front já valida)
+  // porque a rota é o único ponto de gravação — não dá pra confiar só na tela.
+  if (!Array.isArray(comparaveisFontes)) {
+    return res.status(400).json({ erro: 'Formato inválido para as fontes dos comparáveis.' });
   }
   for (const { id, urlFonte } of comparaveisFontes) {
-    if (!id || !urlValida(urlFonte)) {
+    if (!id || (urlFonte && !urlValida(urlFonte))) {
       return res.status(400).json({
-        erro: 'Todas as URLs de fonte precisam ser links válidos (http:// ou https://).',
+        erro: 'Quando informada, a URL de fonte precisa ser um link válido (http:// ou https://).',
       });
     }
   }
 
+  // Quem não tem assinatura ativa (nem é admin) está aqui por ter comprado
+  // um crédito de laudo avulso — consumimos um agora, na emissão efetiva do
+  // laudo (não na busca de comparáveis, que não é o produto pago em si).
+  // Recheca dentro da transação: o gate de entrada na rota (exigirAcesso) já
+  // exigiu crédito disponível, mas revalidamos aqui pra não gastar em dobro
+  // se o corretor reenviar a mesma emissão duas vezes em paralelo.
+  const precisaConsumirCredito = req.usuario.tipo !== 'admin' && !req.assinatura;
+
   const salvar = db.transaction(() => {
+    if (precisaConsumirCredito) {
+      const credito = db
+        .prepare(
+          `SELECT id FROM creditos_laudo WHERE usuario_id = ? AND status = 'disponivel'
+           ORDER BY id ASC LIMIT 1`
+        )
+        .get(req.usuario.id);
+      if (!credito) {
+        throw new ErroAcessoNegado('Nenhum crédito de laudo avulso disponível. Compre um crédito ou assine.');
+      }
+      db.prepare(
+        `UPDATE creditos_laudo SET status = 'usado', avaliacao_id = ?, usado_em = datetime('now') WHERE id = ?`
+      ).run(avaliacao.id, credito.id);
+    }
+
     db.prepare(
       `UPDATE avaliacoes SET
          solicitante_nome = ?, solicitante_cpf = ?, finalidade = ?, objetivo = ?,
@@ -504,7 +668,13 @@ app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAssinaturaAtiva,
       atualizarFonte.run(urlFonte, id, avaliacao.id);
     }
   });
-  salvar();
+
+  try {
+    salvar();
+  } catch (e) {
+    if (e instanceof ErroAcessoNegado) return res.status(402).json({ erro: e.message, acao: 'assinar' });
+    throw e;
+  }
 
   res.json({ ok: true });
 });
@@ -517,7 +687,7 @@ app.put('/api/corretor/avaliacao/:id/laudo', exigirLogin, exigirAssinaturaAtiva,
 app.post(
   '/api/corretor/avaliacao/:id/anexos',
   exigirLogin,
-  exigirAssinaturaAtiva,
+  exigirAcesso,
   upload.array('arquivos', ANEXO_QTD_MAXIMA_POR_AVALIACAO),
   async (req, res) => {
     const avaliacao = db
@@ -551,7 +721,7 @@ app.post(
  * origem do app), para o navegador poder buscar a imagem sem depender de
  * CORS configurado no bucket R2 — usado ao montar o PDF do laudo.
  */
-app.get('/api/corretor/anexo/:id/conteudo', exigirLogin, exigirAssinaturaAtiva, async (req, res) => {
+app.get('/api/corretor/anexo/:id/conteudo', exigirLogin, exigirAcesso, async (req, res) => {
   const anexo = db
     .prepare(
       `SELECT a.chave, a.mime_type
@@ -614,6 +784,32 @@ app.post('/api/assinatura/criar', exigirLogin, (req, res) => {
   res.json({ ok: true, plano, aviso: 'Assinatura ativada sem cobrança (ambiente de teste).' });
 });
 
+/**
+ * POST /api/creditos/comprar
+ *
+ * Compra avulsa: 1 crédito = direito a emitir 1 laudo PTAM, sem assinatura.
+ * Alternativa para o corretor que avalia esporadicamente.
+ *
+ * ─────────────────────────────────────────────────────────────────
+ * ATENÇÃO DESENVOLVEDOR — INTEGRAÇÃO DE PAGAMENTO PENDENTE
+ *
+ * Igual à assinatura acima: esta rota CONCEDE O CRÉDITO SEM COBRAR. Em
+ * produção, substituir por: criar cobrança no gateway → aguardar
+ * confirmação via webhook → só então inserir a linha com status
+ * 'disponivel'. Ver item 5 do briefing.
+ * ─────────────────────────────────────────────────────────────────
+ */
+const VALOR_CREDITO_LAUDO_CENTAVOS = 26990;
+
+app.post('/api/creditos/comprar', exigirLogin, (req, res) => {
+  db.prepare(
+    `INSERT INTO creditos_laudo (usuario_id, status, valor_centavos, gateway)
+     VALUES (?, 'disponivel', ?, 'STUB-SEM-COBRANCA')`
+  ).run(req.usuario.id, VALOR_CREDITO_LAUDO_CENTAVOS);
+
+  res.json({ ok: true, aviso: 'Crédito de laudo avulso concedido sem cobrança (ambiente de teste).' });
+});
+
 /* ══════════════════════════════════════════════════════════════════
    ADMIN — leads e índice
    ══════════════════════════════════════════════════════════════════ */
@@ -642,6 +838,7 @@ app.get('/api/admin/metricas', exigirLogin, exigirAdmin, (req, res) => {
     avaliacoesComparaveis: q(`SELECT COUNT(*) n FROM avaliacoes WHERE tipo='comparaveis'`),
     corretores: q(`SELECT COUNT(*) n FROM usuarios WHERE tipo='corretor'`),
     assinaturasAtivas: q(`SELECT COUNT(*) n FROM assinaturas WHERE status='ativa'`),
+    creditosLaudoVendidos: q(`SELECT COUNT(*) n FROM creditos_laudo`),
   });
 });
 
